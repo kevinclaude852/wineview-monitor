@@ -1,18 +1,21 @@
 """
 Flask web app + APScheduler background job.
-- GET /rss  → RSS feed (application/rss+xml)
-- GET /     → simple status page
-- Scrape job runs every 3 hours (configurable via SCRAPE_INTERVAL_HOURS env var)
+- GET /rss        → RSS feed (application/rss+xml)
+- GET /           → simple status page
+- POST /api/scrape → trigger scrape (used by Vercel Cron)
+
+On Railway: APScheduler runs scrape_job every SCRAPE_INTERVAL_HOURS (default 3).
+On Vercel:  APScheduler is disabled; Vercel Cron hits /api/scrape instead.
+            In-memory RSS list is re-populated from Redis on every cold start.
 """
 
 import logging
 import os
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, request
 
 import rss
-from scraper import detect_new_products, load_state, scrape_all_products, Product
+from scraper import detect_new_products, load_state, Product
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,18 +27,30 @@ app = Flask(__name__)
 
 SCRAPE_INTERVAL_HOURS = float(os.environ.get("SCRAPE_INTERVAL_HOURS", "3"))
 PORT = int(os.environ.get("PORT", "8080"))
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
+# Vercel sets VERCEL=1 automatically in the runtime environment
+ON_VERCEL = bool(os.environ.get("VERCEL"))
 
 
 # ---------------------------------------------------------------------------
-# Scheduled job
+# Helpers
 # ---------------------------------------------------------------------------
+
+def _load_state_into_rss() -> None:
+    """Populate the in-memory RSS list from persisted state (Redis or file)."""
+    saved = load_state()
+    if saved:
+        products = [Product(**v) for v in saved.values()]
+        products.sort(key=lambda p: p.first_seen, reverse=True)
+        rss.load_from_state(products)
+        logger.info("Loaded %d products from state", len(products))
+
 
 def scrape_job() -> None:
     logger.info("Scrape job started")
     try:
         new_products, all_products = detect_new_products()
         rss.add_new_products(new_products)
-        # Keep feed populated with full product list on first run
         if not new_products:
             rss.load_from_state(all_products)
     except Exception:
@@ -48,14 +63,32 @@ def scrape_job() -> None:
 
 @app.route("/rss")
 def rss_feed():
+    # On Vercel each request is a fresh process — reload from Redis
+    if ON_VERCEL or not rss._feed_items:
+        _load_state_into_rss()
     self_url = request.url
     feed_xml = rss.build_rss().replace("{SELF_URL}", self_url)
     return Response(feed_xml, mimetype="application/rss+xml; charset=utf-8")
 
 
+@app.route("/api/scrape", methods=["GET", "POST"])
+def scrape_endpoint():
+    """Called by Vercel Cron (or manually). Protected by CRON_SECRET."""
+    auth = request.headers.get("Authorization", "")
+    if CRON_SECRET and auth != f"Bearer {CRON_SECRET}":
+        return Response("Unauthorized", status=401)
+    try:
+        scrape_job()
+        return {"ok": True, "products": len(rss._feed_items)}
+    except Exception as exc:
+        logger.exception("Scrape endpoint failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
 @app.route("/")
 def index():
-    from datetime import datetime, timezone
+    if ON_VERCEL or not rss._feed_items:
+        _load_state_into_rss()
     products = list(rss._feed_items)
     count = len(products)
     last = rss._last_updated
@@ -85,25 +118,14 @@ Interval: every <strong>{SCRAPE_INTERVAL_HOURS:.0f} hours</strong></p>
 
 
 # ---------------------------------------------------------------------------
-# Startup
+# Startup (Railway / local only – not executed on Vercel)
 # ---------------------------------------------------------------------------
 
-def _bootstrap() -> None:
-    """On startup, load any persisted state into the RSS feed, then run one scrape."""
-    saved = load_state()
-    if saved:
-        products = [Product(**v) for v in saved.values()]
-        # Sort newest first by first_seen
-        products.sort(key=lambda p: p.first_seen, reverse=True)
-        rss.load_from_state(products)
-        logger.info("Loaded %d products from saved state", len(products))
-    # Run an immediate scrape
-    scrape_job()
-
-
 if __name__ == "__main__":
-    _bootstrap()
+    _load_state_into_rss()
+    scrape_job()  # immediate scrape on startup
 
+    from apscheduler.schedulers.background import BackgroundScheduler
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         scrape_job,

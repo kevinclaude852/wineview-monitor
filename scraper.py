@@ -6,6 +6,7 @@ WooCommerce standard HTML selectors are used.
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -18,7 +19,9 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://wineview.com.hk/product-category/wine-shop/"
-STATE_FILE = Path("state.json")
+STATE_FILE = Path(os.environ.get("STATE_FILE", "state.json"))
+REDIS_URL = os.environ.get("REDIS_URL") or os.environ.get("KV_URL")
+REDIS_KEY = "wineview:state"
 
 HEADERS = {
     "User-Agent": (
@@ -139,11 +142,33 @@ def scrape_all_products(max_pages: int = 20) -> list[Product]:
 
 
 # ---------------------------------------------------------------------------
-# State persistence
+# State persistence  (Redis when REDIS_URL is set, file otherwise)
 # ---------------------------------------------------------------------------
 
+def _get_redis():
+    """Return a Redis client if REDIS_URL is configured, else None."""
+    if not REDIS_URL:
+        return None
+    try:
+        import redis as _redis
+        return _redis.from_url(REDIS_URL, decode_responses=True)
+    except ImportError:
+        logger.warning("redis package not installed; falling back to file state")
+        return None
+
+
 def load_state() -> dict[str, dict]:
-    """Return {product_id: product_dict} from state file."""
+    """Return {product_id: product_dict} from Redis or file."""
+    r = _get_redis()
+    if r is not None:
+        try:
+            raw = r.get(REDIS_KEY)
+            if raw:
+                return json.loads(raw)
+            return {}
+        except Exception as exc:
+            logger.warning("Redis read failed: %s", exc)
+
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -153,8 +178,19 @@ def load_state() -> dict[str, dict]:
 
 
 def save_state(products: list[Product]) -> None:
+    """Persist state to Redis or file."""
     state = {p.id: asdict(p) for p in products}
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    payload = json.dumps(state, ensure_ascii=False)
+
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.set(REDIS_KEY, payload)
+            return
+        except Exception as exc:
+            logger.warning("Redis write failed: %s; falling back to file", exc)
+
+    STATE_FILE.write_text(payload)
 
 
 # ---------------------------------------------------------------------------
