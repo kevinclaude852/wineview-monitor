@@ -121,6 +121,45 @@ def _scrape_page(session: requests.Session, url: str) -> tuple[list[Product], Op
     return products, next_url
 
 
+def inspect_page(url: str = BASE_URL) -> dict:
+    """
+    Fetch the page and report diagnostics about its structure, to help
+    figure out why product selectors might not be matching (theme change,
+    JS-rendered content, redirect, age gate, etc.).
+    """
+    session = requests.Session()
+    resp = session.get(url, headers=HEADERS, timeout=20)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    candidate_selectors = [
+        "ul.products li.product",
+        "li.product",
+        ".products",
+        ".product",
+        "div.product",
+        "a.add_to_cart_button",
+        "[class*='product']",
+        "script[type='application/ld+json']",
+    ]
+    selector_counts = {sel: len(soup.select(sel)) for sel in candidate_selectors}
+
+    body_text = soup.get_text(" ", strip=True).lower()
+    age_gate_hit = any(
+        kw in body_text for kw in ("are you 18", "are you over 18", "verify your age", "age verification")
+    )
+
+    return {
+        "requested_url": url,
+        "final_url": resp.url,
+        "status_code": resp.status_code,
+        "html_length": len(resp.text),
+        "title": soup.title.get_text(strip=True) if soup.title else None,
+        "selector_counts": selector_counts,
+        "possible_age_gate": age_gate_hit,
+        "html_snippet": resp.text[:4000],
+    }
+
+
 def scrape_all_products(max_pages: int = 20) -> list[Product]:
     """Scrape all pages and return every product found (page 1 first = newest first)."""
     session = requests.Session()

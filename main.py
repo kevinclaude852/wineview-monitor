@@ -16,7 +16,7 @@ from flask import Flask, Response, request
 
 import notifier
 import rss
-from scraper import detect_new_products, load_state, Product
+from scraper import detect_new_products, load_state, inspect_page, Product
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +85,19 @@ def scrape_endpoint():
         return {"ok": True, "products": len(rss._feed_items)}
     except Exception as exc:
         logger.exception("Scrape endpoint failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
+@app.route("/api/debug")
+def debug_endpoint():
+    """Diagnostic: fetch the target page and report why selectors may not match."""
+    auth = request.headers.get("Authorization", "")
+    if CRON_SECRET and auth != f"Bearer {CRON_SECRET}":
+        return Response("Unauthorized", status=401)
+    try:
+        return inspect_page()
+    except Exception as exc:
+        logger.exception("Debug endpoint failed")
         return {"ok": False, "error": str(exc)}, 500
 
 
