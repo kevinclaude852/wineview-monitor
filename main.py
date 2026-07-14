@@ -14,6 +14,7 @@ import os
 
 from flask import Flask, Response, request
 
+import notifier
 import rss
 from scraper import detect_new_products, load_state, Product
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-SCRAPE_INTERVAL_HOURS = float(os.environ.get("SCRAPE_INTERVAL_HOURS", "3"))
+SCRAPE_INTERVAL_HOURS = float(os.environ.get("SCRAPE_INTERVAL_HOURS", "1"))
 PORT = int(os.environ.get("PORT", "8080"))
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 # Vercel sets VERCEL=1 automatically in the runtime environment
@@ -51,7 +52,9 @@ def scrape_job() -> None:
     try:
         new_products, all_products = detect_new_products()
         rss.add_new_products(new_products)
-        if not new_products:
+        if new_products:
+            notifier.send_new_products(new_products)
+        else:
             rss.load_from_state(all_products)
     except Exception:
         logger.exception("Scrape job failed")
