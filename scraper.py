@@ -243,9 +243,26 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
     new_products are ordered newest-first (page order).
     """
     previous = load_state()
-    is_bootstrap = not previous
     current = scrape_all_products()
 
+    if not current:
+        # A 0-product scrape almost always means the site blocked/rate-limited
+        # this request (or served a JS-challenge page) rather than the shop
+        # genuinely having no products. Keep the last known-good state instead
+        # of wiping it — overwriting it here would make the next successful
+        # scrape look like a first-ever run and flood notifications with the
+        # entire existing catalog.
+        if previous:
+            logger.error(
+                "Scrape returned 0 products but %d were previously known; "
+                "treating as a failed fetch and keeping prior state",
+                len(previous),
+            )
+            return [], [Product(**v) for v in previous.values()]
+        logger.warning("Scrape returned 0 products and no previous state exists")
+        return [], []
+
+    is_bootstrap = not previous
     new_products = []
     for p in current:
         if p.id not in previous:
