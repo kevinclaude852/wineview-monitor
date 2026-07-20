@@ -243,6 +243,7 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
     new_products are ordered newest-first (page order).
     """
     previous = load_state()
+    is_bootstrap = not previous
     current = scrape_all_products()
 
     new_products = []
@@ -252,6 +253,17 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
         else:
             # Preserve original first_seen date
             p.first_seen = previous[p.id]["first_seen"]
+
+    if is_bootstrap and new_products:
+        # No prior state (first-ever run, or state store was reset) — every
+        # currently-listed product would otherwise look "new". Seed the
+        # baseline silently instead of flooding notifications with the
+        # entire existing catalog.
+        logger.info(
+            "No previous state found; seeding baseline of %d product(s) without notifying",
+            len(new_products),
+        )
+        new_products = []
 
     if new_products:
         logger.info("Found %d new product(s)", len(new_products))
