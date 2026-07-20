@@ -50,7 +50,7 @@ def _format_price_block(price: str) -> str:
                 seen.append(cleaned)
         if len(seen) >= 2:
             original, current = seen[0], seen[-1]
-            return f"~{_escape_md(original)}~\n__{_escape_md(current)}__"
+            return f"~{_escape_md(original)}~\n_{_escape_md(current)}_"
 
     return _escape_md(_clean_amount(amounts[0]))
 
