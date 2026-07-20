@@ -121,6 +121,45 @@ def _scrape_page(session: requests.Session, url: str) -> tuple[list[Product], Op
     return products, next_url
 
 
+def inspect_page(url: str = BASE_URL) -> dict:
+    """
+    Fetch the page and report diagnostics about its structure, to help
+    figure out why product selectors might not be matching (theme change,
+    JS-rendered content, redirect, age gate, etc.).
+    """
+    session = requests.Session()
+    resp = session.get(url, headers=HEADERS, timeout=20)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    candidate_selectors = [
+        "ul.products li.product",
+        "li.product",
+        ".products",
+        ".product",
+        "div.product",
+        "a.add_to_cart_button",
+        "[class*='product']",
+        "script[type='application/ld+json']",
+    ]
+    selector_counts = {sel: len(soup.select(sel)) for sel in candidate_selectors}
+
+    body_text = soup.get_text(" ", strip=True).lower()
+    age_gate_hit = any(
+        kw in body_text for kw in ("are you 18", "are you over 18", "verify your age", "age verification")
+    )
+
+    return {
+        "requested_url": url,
+        "final_url": resp.url,
+        "status_code": resp.status_code,
+        "html_length": len(resp.text),
+        "title": soup.title.get_text(strip=True) if soup.title else None,
+        "selector_counts": selector_counts,
+        "possible_age_gate": age_gate_hit,
+        "html_snippet": resp.text[:4000],
+    }
+
+
 def scrape_all_products(max_pages: int = 20) -> list[Product]:
     """Scrape all pages and return every product found (page 1 first = newest first)."""
     session = requests.Session()
@@ -206,6 +245,24 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
     previous = load_state()
     current = scrape_all_products()
 
+    if not current:
+        # A 0-product scrape almost always means the site blocked/rate-limited
+        # this request (or served a JS-challenge page) rather than the shop
+        # genuinely having no products. Keep the last known-good state instead
+        # of wiping it — overwriting it here would make the next successful
+        # scrape look like a first-ever run and flood notifications with the
+        # entire existing catalog.
+        if previous:
+            logger.error(
+                "Scrape returned 0 products but %d were previously known; "
+                "treating as a failed fetch and keeping prior state",
+                len(previous),
+            )
+            return [], [Product(**v) for v in previous.values()]
+        logger.warning("Scrape returned 0 products and no previous state exists")
+        return [], []
+
+    is_bootstrap = not previous
     new_products = []
     for p in current:
         if p.id not in previous:
@@ -213,6 +270,17 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
         else:
             # Preserve original first_seen date
             p.first_seen = previous[p.id]["first_seen"]
+
+    if is_bootstrap and new_products:
+        # No prior state (first-ever run, or state store was reset) — every
+        # currently-listed product would otherwise look "new". Seed the
+        # baseline silently instead of flooding notifications with the
+        # entire existing catalog.
+        logger.info(
+            "No previous state found; seeding baseline of %d product(s) without notifying",
+            len(new_products),
+        )
+        new_products = []
 
     if new_products:
         logger.info("Found %d new product(s)", len(new_products))
