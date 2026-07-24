@@ -21,11 +21,17 @@ MAX_PRODUCTS_PER_MESSAGE = 15
 
 _AMOUNT_RE = re.compile(r"\$\s?[\d,]+(?:\.\d+)?")
 _MDV2_SPECIAL_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!])")
+_MDV2_URL_SPECIAL_RE = re.compile(r"([\\)])")
 
 
 def _escape_md(text: str) -> str:
     """Escape reserved MarkdownV2 characters in plain (non-entity) text."""
     return _MDV2_SPECIAL_RE.sub(r"\\\1", text)
+
+
+def _escape_md_url(url: str) -> str:
+    """Escape a URL for use inside a MarkdownV2 [text](url) link — only \\ and ) need it there."""
+    return _MDV2_URL_SPECIAL_RE.sub(r"\\\1", url)
 
 
 def _clean_amount(raw_amount: str) -> str:
@@ -61,11 +67,11 @@ def _format_message(products: list[Product]) -> str:
 
     entries = []
     for p in products[:MAX_PRODUCTS_PER_MESSAGE]:
-        entry_lines = [f"*{_escape_md(p.name)}*"]
+        name_link = f"*[{_escape_md(p.name)}]({_escape_md_url(p.url)})*"
+        entry_lines = [name_link]
         price_block = _format_price_block(p.price)
         if price_block:
             entry_lines.append(price_block)
-        entry_lines.append(_escape_md(p.url))
         entries.append("\n".join(entry_lines))
 
     remaining = count - MAX_PRODUCTS_PER_MESSAGE
