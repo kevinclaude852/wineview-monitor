@@ -78,6 +78,8 @@ def _format_message(products: list[Product]) -> str:
     for p in products[:MAX_PRODUCTS_PER_MESSAGE]:
         name_link = f"*[{_escape_md(p.name)}]({_escape_md_url(p.url)})*"
         entry_lines = [name_link]
+        if p.origin:
+            entry_lines.append(_escape_md(p.origin))
         price_block = _format_price_block(p)
         if price_block:
             entry_lines.append(price_block)

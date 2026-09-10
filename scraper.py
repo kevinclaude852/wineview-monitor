@@ -10,6 +10,7 @@ import os
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from typing import Optional
 
@@ -64,10 +65,12 @@ class Product:
     url: str
     image_url: str
     first_seen: str  # ISO 8601 UTC
-    # Only populated for products the Store API reports as on sale. Defaults
-    # keep older saved state (which lacks these keys) loadable.
+    # Store API only; defaults keep older saved state (which lacks these keys)
+    # loadable. regular/sale are set for products reported as on sale, origin
+    # is 'Country/Region/Grapes'.
     regular_price: str = ""
     sale_price: str = ""
+    origin: str = ""
 
 
 def _parse_product_id(li_tag) -> str:
@@ -267,6 +270,30 @@ def _format_api_price(prices: dict, key: str) -> str:
     return f"{symbol} {value:,.2f}"
 
 
+ORIGIN_TAXONOMIES = ("pa_country", "pa_region", "pa_grapes")
+
+
+def _attribute_terms(item: dict, taxonomy: str) -> list[str]:
+    for attribute in item.get("attributes") or []:
+        if attribute.get("taxonomy") == taxonomy:
+            return [
+                unescape(term["name"])
+                for term in attribute.get("terms") or []
+                if term.get("name")
+            ]
+    return []
+
+
+def _format_origin(item: dict) -> str:
+    """'Italy/Tuscany/Blend' from the country, region and grapes attributes."""
+    parts = []
+    for taxonomy in ORIGIN_TAXONOMIES:
+        terms = _attribute_terms(item, taxonomy)
+        if terms:
+            parts.append(", ".join(terms))
+    return "/".join(parts)
+
+
 def _product_from_api(item: dict, now: str) -> Product:
     prices = item.get("prices") or {}
     images = item.get("images") or []
@@ -278,13 +305,15 @@ def _product_from_api(item: dict, now: str) -> Product:
         # Match the HTML scraper's ID format so switching data sources doesn't
         # make every product look new against existing saved state.
         id=f"post-{item.get('id')}",
-        name=item.get("name", ""),
+        # The API returns names HTML-encoded, e.g. 'D&#8217;Auvenay'.
+        name=unescape(item.get("name", "")),
         price=current or regular,
         url=item.get("permalink", ""),
         image_url=images[0].get("src", "") if images else "",
         first_seen=item.get("date_created") or now,
         regular_price=regular if on_sale else "",
         sale_price=current if on_sale else "",
+        origin=_format_origin(item),
     )
 
 
