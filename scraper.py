@@ -29,11 +29,26 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Referer": "https://www.google.com/",
 }
+
+# Some WAF/bot-detection blocks are probabilistic or rate-based rather than an
+# absolute ban, so a short retry can succeed where the first attempt didn't.
+RETRYABLE_STATUS_CODES = {403, 429, 503}
+MAX_FETCH_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 3
 
 
 @dataclass
@@ -78,8 +93,31 @@ def _scrape_page(session: requests.Session, url: str) -> tuple[list[Product], Op
     """
     Scrape one page. Returns (products_on_page, next_page_url_or_None).
     """
+    resp = None
+    for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=20)
+        except requests.RequestException as exc:
+            if attempt == MAX_FETCH_ATTEMPTS:
+                logger.error("Failed to fetch %s: %s", url, exc)
+                return [], None
+            logger.warning(
+                "Error fetching %s (attempt %d/%d): %s; retrying",
+                url, attempt, MAX_FETCH_ATTEMPTS, exc,
+            )
+            time.sleep(RETRY_DELAY_SECONDS * attempt)
+            continue
+
+        if resp.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_FETCH_ATTEMPTS:
+            logger.warning(
+                "Got HTTP %d fetching %s (attempt %d/%d); retrying",
+                resp.status_code, url, attempt, MAX_FETCH_ATTEMPTS,
+            )
+            time.sleep(RETRY_DELAY_SECONDS * attempt)
+            continue
+        break
+
     try:
-        resp = session.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
     except requests.RequestException as exc:
         logger.error("Failed to fetch %s: %s", url, exc)
@@ -158,6 +196,43 @@ def inspect_page(url: str = BASE_URL) -> dict:
         "possible_age_gate": age_gate_hit,
         "html_snippet": resp.text[:4000],
     }
+
+
+CANDIDATE_ENDPOINTS = [
+    "https://wineview.com.hk/product-category/wine-shop/feed/",
+    "https://wineview.com.hk/feed/",
+    "https://wineview.com.hk/wp-json/wc/store/v1/products?per_page=30&orderby=date&order=desc",
+    "https://wineview.com.hk/wp-json/wc/store/products?per_page=30",
+    "https://wineview.com.hk/wp-json/wp/v2/product?per_page=30",
+    "https://wineview.com.hk/product-sitemap.xml",
+    "https://wineview.com.hk/wp-sitemap-posts-product-1.xml",
+]
+
+
+def probe_endpoints() -> list[dict]:
+    """
+    Try the site's machine-readable endpoints (RSS feed, WooCommerce Store API,
+    sitemaps) to find one that is reachable and usable as a data source instead
+    of parsing the HTML catalog page.
+    """
+    session = requests.Session()
+    results = []
+    for url in CANDIDATE_ENDPOINTS:
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=20)
+            body = resp.text
+            results.append({
+                "url": url,
+                "status_code": resp.status_code,
+                "content_type": resp.headers.get("Content-Type", ""),
+                "length": len(body),
+                "bot_challenge": "sgcaptcha" in body,
+                "snippet": body[:400],
+            })
+        except requests.RequestException as exc:
+            results.append({"url": url, "error": str(exc)})
+        time.sleep(1)
+    return results
 
 
 def scrape_all_products(max_pages: int = 20) -> list[Product]:
