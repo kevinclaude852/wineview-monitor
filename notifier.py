@@ -40,8 +40,18 @@ def _clean_amount(raw_amount: str) -> str:
     return f"$ {compact[1:]}"
 
 
-def _format_price_block(price: str) -> str:
-    """MarkdownV2 price line(s): single line, or struck-through + underlined for a sale."""
+def _sale_block(regular: str, current: str) -> str:
+    return f"~{_escape_md(_clean_amount(regular))}~\n_{_escape_md(_clean_amount(current))}_"
+
+
+def _format_price_block(product: Product) -> str:
+    """MarkdownV2 price line(s): single line, or struck-through + italic for a sale."""
+    # Store API products carry the sale/regular split as real fields; only the
+    # HTML-scraped ones need the price text picked apart.
+    if product.regular_price and product.sale_price:
+        return _sale_block(product.regular_price, product.sale_price)
+
+    price = product.price
     if not price:
         return ""
     amounts = _AMOUNT_RE.findall(price)
@@ -55,8 +65,7 @@ def _format_price_block(price: str) -> str:
             if cleaned not in seen:
                 seen.append(cleaned)
         if len(seen) >= 2:
-            original, current = seen[0], seen[-1]
-            return f"~{_escape_md(original)}~\n_{_escape_md(current)}_"
+            return _sale_block(seen[0], seen[-1])
 
     return _escape_md(_clean_amount(amounts[0]))
 
@@ -69,7 +78,7 @@ def _format_message(products: list[Product]) -> str:
     for p in products[:MAX_PRODUCTS_PER_MESSAGE]:
         name_link = f"*[{_escape_md(p.name)}]({_escape_md_url(p.url)})*"
         entry_lines = [name_link]
-        price_block = _format_price_block(p.price)
+        price_block = _format_price_block(p)
         if price_block:
             entry_lines.append(price_block)
         entries.append("\n".join(entry_lines))
