@@ -46,17 +46,46 @@ RSS feed, but logs a warning instead of sending a Telegram message.
 | `CRON_SECRET`            | no       | —           | If set, `/api/scrape` requires `Authorization: Bearer <secret>` |
 | `PORT`                   | no       | `8080`      | Local server port                                  |
 
+## Where to run it (important)
+
+wineview.com.hk is hosted on SiteGround, whose bot protection challenges
+requests from datacenter IP ranges. Every endpoint — the catalog HTML, both
+RSS feeds, the WordPress REST API, the WooCommerce Store API and the sitemaps
+— returns a 202 with a ~200-byte stub redirecting to `/.well-known/sgcaptcha/`
+when requested from a cloud host. Confirmed from Railway on two different
+egress IPs.
+
+**In practice this means the monitor has to run from a residential
+connection** (a home machine, Raspberry Pi, or NAS), not from Railway/Vercel
+or another cloud provider. Running locally also removes the need for Redis:
+`state.json` sits on a normal filesystem and persists across restarts.
+
+Use `/api/probe` to re-test the endpoints from wherever you deploy it.
+
 ## Run locally
 
 ```bash
 pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN=...
 export TELEGRAM_CHAT_ID=...
-python main.py
+
+python main.py --once   # single check, then exit (for cron)
+python main.py          # long-running server + hourly scheduler
 ```
 
-Visit `http://localhost:8080` for the status page, `http://localhost:8080/rss`
-for the feed.
+Without `--once` you get the status page at `http://localhost:8080` and the
+feed at `http://localhost:8080/rss`.
+
+### Hourly via cron (macOS/Linux)
+
+`crontab -e`, then:
+
+```cron
+0 * * * * cd /path/to/wineview-monitor && TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... /path/to/python main.py --once >> monitor.log 2>&1
+```
+
+On Windows, create a Task Scheduler entry running `python main.py --once`
+hourly with the same environment variables set.
 
 ## Deploy
 

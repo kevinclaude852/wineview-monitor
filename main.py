@@ -151,8 +151,15 @@ Interval: every <strong>{SCRAPE_INTERVAL_HOURS:.0f} hours</strong></p>
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import sys
+
     _load_state_into_rss()
     scrape_job()  # immediate scrape on startup
+
+    # `--once` scrapes, notifies and exits — for driving the monitor from cron
+    # (or Task Scheduler) on a machine that isn't running a long-lived server.
+    if "--once" in sys.argv:
+        sys.exit(0)
 
     from apscheduler.schedulers.background import BackgroundScheduler
     scheduler = BackgroundScheduler()
