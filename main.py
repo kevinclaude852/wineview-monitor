@@ -16,7 +16,7 @@ from flask import Flask, Response, request
 
 import notifier
 import rss
-from scraper import detect_new_products, load_state, inspect_page, Product
+from scraper import detect_new_products, load_state, inspect_page, probe_endpoints, Product
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +98,19 @@ def debug_endpoint():
         return inspect_page()
     except Exception as exc:
         logger.exception("Debug endpoint failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
+@app.route("/api/probe")
+def probe_route():
+    """Diagnostic: check which of the site's feed/API endpoints are reachable."""
+    auth = request.headers.get("Authorization", "")
+    if CRON_SECRET and auth != f"Bearer {CRON_SECRET}":
+        return Response("Unauthorized", status=401)
+    try:
+        return {"results": probe_endpoints()}
+    except Exception as exc:
+        logger.exception("Probe endpoint failed")
         return {"ok": False, "error": str(exc)}, 500
 
 

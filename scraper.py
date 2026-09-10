@@ -198,6 +198,43 @@ def inspect_page(url: str = BASE_URL) -> dict:
     }
 
 
+CANDIDATE_ENDPOINTS = [
+    "https://wineview.com.hk/product-category/wine-shop/feed/",
+    "https://wineview.com.hk/feed/",
+    "https://wineview.com.hk/wp-json/wc/store/v1/products?per_page=30&orderby=date&order=desc",
+    "https://wineview.com.hk/wp-json/wc/store/products?per_page=30",
+    "https://wineview.com.hk/wp-json/wp/v2/product?per_page=30",
+    "https://wineview.com.hk/product-sitemap.xml",
+    "https://wineview.com.hk/wp-sitemap-posts-product-1.xml",
+]
+
+
+def probe_endpoints() -> list[dict]:
+    """
+    Try the site's machine-readable endpoints (RSS feed, WooCommerce Store API,
+    sitemaps) to find one that is reachable and usable as a data source instead
+    of parsing the HTML catalog page.
+    """
+    session = requests.Session()
+    results = []
+    for url in CANDIDATE_ENDPOINTS:
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=20)
+            body = resp.text
+            results.append({
+                "url": url,
+                "status_code": resp.status_code,
+                "content_type": resp.headers.get("Content-Type", ""),
+                "length": len(body),
+                "bot_challenge": "sgcaptcha" in body,
+                "snippet": body[:400],
+            })
+        except requests.RequestException as exc:
+            results.append({"url": url, "error": str(exc)})
+        time.sleep(1)
+    return results
+
+
 def scrape_all_products(max_pages: int = 20) -> list[Product]:
     """Scrape all pages and return every product found (page 1 first = newest first)."""
     session = requests.Session()
