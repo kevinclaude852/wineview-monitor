@@ -288,28 +288,40 @@ def _product_from_api(item: dict, now: str) -> Product:
     )
 
 
-def _lookup_category_id(session: requests.Session) -> Optional[int]:
+def _collect_category_ids(categories: list[dict], slug: str) -> list[int]:
+    """
+    IDs for `slug` plus every category beneath it.
+
+    'wine-shop' is a parent category — products are tagged only with its
+    children (red-wine, white-wine, ...), so filtering on the parent ID alone
+    can match nothing.
+    """
+    root = next((c for c in categories if c.get("slug") == slug), None)
+    if not root:
+        return []
+
+    wanted = {root["id"]}
+    # Walk down the tree until no new children are found (depth is unknown).
+    while True:
+        children = {
+            c["id"] for c in categories
+            if c.get("parent") in wanted and c["id"] not in wanted
+        }
+        if not children:
+            return sorted(wanted)
+        wanted |= children
+
+
+def _lookup_category_ids(session: requests.Session) -> list[int]:
     try:
-        resp = _api_get(session, "/products/categories", {"slug": CATEGORY_SLUG})
-        for category in resp.json():
-            if category.get("slug") == CATEGORY_SLUG:
-                return category.get("id")
+        resp = _api_get(session, "/products/categories", {"per_page": 100})
+        return _collect_category_ids(resp.json(), CATEGORY_SLUG)
     except (requests.RequestException, ValueError) as exc:
         logger.warning("Store API category lookup failed: %s", exc)
-    return None
+        return []
 
 
-def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
-    """Fetch products from the WooCommerce Store API, newest first."""
-    session = requests.Session()
-    params = {"per_page": 100, "orderby": "date", "order": "desc"}
-
-    category_id = _lookup_category_id(session)
-    if category_id:
-        params["category"] = category_id
-    else:
-        logger.warning("Could not resolve category %r; fetching all products", CATEGORY_SLUG)
-
+def _fetch_api_pages(session: requests.Session, params: dict, max_pages: int) -> list[Product]:
     products: list[Product] = []
     now = datetime.now(timezone.utc).isoformat()
     page = 1
@@ -328,8 +340,28 @@ def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
             break
         page += 1
         time.sleep(1)
+    return products
 
-    logger.info("Store API returned %d product(s)", len(products))
+
+def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
+    """Fetch products from the WooCommerce Store API, newest first."""
+    session = requests.Session()
+    params = {"per_page": 100, "orderby": "date", "order": "desc"}
+
+    category_ids = _lookup_category_ids(session)
+    if category_ids:
+        products = _fetch_api_pages(
+            session, {**params, "category": ",".join(map(str, category_ids))}, max_pages
+        )
+        if products:
+            logger.info("Store API returned %d product(s) in %r", len(products), CATEGORY_SLUG)
+            return products
+        logger.warning("Category filter matched nothing; retrying unfiltered")
+    else:
+        logger.warning("Could not resolve category %r; fetching unfiltered", CATEGORY_SLUG)
+
+    products = _fetch_api_pages(session, params, max_pages)
+    logger.info("Store API returned %d product(s) unfiltered", len(products))
     return products
 
 
