@@ -10,6 +10,7 @@ import os
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from typing import Optional
 
@@ -51,14 +52,25 @@ MAX_FETCH_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 3
 
 
+API_BASE = "https://wineview.com.hk/wp-json/wc/store/v1"
+CATEGORY_SLUG = "wine-shop"
+USE_STORE_API = os.environ.get("USE_STORE_API", "1") != "0"
+
+
 @dataclass
 class Product:
-    id: str          # unique key: slugified name or WC post ID from class
+    id: str          # unique key: WC post ID as 'post-1234'
     name: str
     price: str
     url: str
     image_url: str
     first_seen: str  # ISO 8601 UTC
+    # Store API only; defaults keep older saved state (which lacks these keys)
+    # loadable. regular/sale are set for products reported as on sale, origin
+    # is 'Country/Region/Grapes'.
+    regular_price: str = ""
+    sale_price: str = ""
+    origin: str = ""
 
 
 def _parse_product_id(li_tag) -> str:
@@ -235,8 +247,168 @@ def probe_endpoints() -> list[dict]:
     return results
 
 
+def _api_get(session: requests.Session, path: str, params: dict) -> requests.Response:
+    """GET a Store API path, insisting on a JSON response (a bot challenge returns HTML)."""
+    resp = session.get(f"{API_BASE}{path}", headers=HEADERS, params=params, timeout=20)
+    resp.raise_for_status()
+    content_type = resp.headers.get("Content-Type", "")
+    if "json" not in content_type:
+        raise ValueError(f"expected JSON from {path}, got {content_type!r}")
+    return resp
+
+
+def _format_api_price(prices: dict, key: str) -> str:
+    """Store API prices are minor units as strings: '23200' + minor_unit 2 -> '$ 232.00'."""
+    raw = prices.get(key)
+    if raw in (None, ""):
+        return ""
+    try:
+        value = int(raw) / (10 ** int(prices.get("currency_minor_unit", 2)))
+    except (TypeError, ValueError):
+        return ""
+    symbol = prices.get("currency_prefix") or prices.get("currency_symbol") or "$"
+    return f"{symbol} {value:,.2f}"
+
+
+ORIGIN_TAXONOMIES = ("pa_country", "pa_region", "pa_grapes")
+
+
+def _attribute_terms(item: dict, taxonomy: str) -> list[str]:
+    for attribute in item.get("attributes") or []:
+        if attribute.get("taxonomy") == taxonomy:
+            return [
+                unescape(term["name"])
+                for term in attribute.get("terms") or []
+                if term.get("name")
+            ]
+    return []
+
+
+def _format_origin(item: dict) -> str:
+    """'Italy/Tuscany/Blend' from the country, region and grapes attributes."""
+    parts = []
+    for taxonomy in ORIGIN_TAXONOMIES:
+        terms = _attribute_terms(item, taxonomy)
+        if terms:
+            parts.append(", ".join(terms))
+    return "/".join(parts)
+
+
+def _product_from_api(item: dict, now: str) -> Product:
+    prices = item.get("prices") or {}
+    images = item.get("images") or []
+    current = _format_api_price(prices, "price")
+    regular = _format_api_price(prices, "regular_price")
+    on_sale = bool(item.get("on_sale")) and regular and regular != current
+
+    return Product(
+        # Match the HTML scraper's ID format so switching data sources doesn't
+        # make every product look new against existing saved state.
+        id=f"post-{item.get('id')}",
+        # The API returns names HTML-encoded, e.g. 'D&#8217;Auvenay'.
+        name=unescape(item.get("name", "")),
+        price=current or regular,
+        url=item.get("permalink", ""),
+        image_url=images[0].get("src", "") if images else "",
+        first_seen=item.get("date_created") or now,
+        regular_price=regular if on_sale else "",
+        sale_price=current if on_sale else "",
+        origin=_format_origin(item),
+    )
+
+
+def _collect_category_ids(categories: list[dict], slug: str) -> list[int]:
+    """
+    IDs for `slug` plus every category beneath it.
+
+    'wine-shop' is a parent category — products are tagged only with its
+    children (red-wine, white-wine, ...), so filtering on the parent ID alone
+    can match nothing.
+    """
+    root = next((c for c in categories if c.get("slug") == slug), None)
+    if not root:
+        return []
+
+    wanted = {root["id"]}
+    # Walk down the tree until no new children are found (depth is unknown).
+    while True:
+        children = {
+            c["id"] for c in categories
+            if c.get("parent") in wanted and c["id"] not in wanted
+        }
+        if not children:
+            return sorted(wanted)
+        wanted |= children
+
+
+def _lookup_category_ids(session: requests.Session) -> list[int]:
+    try:
+        resp = _api_get(session, "/products/categories", {"per_page": 100})
+        return _collect_category_ids(resp.json(), CATEGORY_SLUG)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Store API category lookup failed: %s", exc)
+        return []
+
+
+def _fetch_api_pages(session: requests.Session, params: dict, max_pages: int) -> list[Product]:
+    products: list[Product] = []
+    now = datetime.now(timezone.utc).isoformat()
+    page = 1
+    while page <= max_pages:
+        resp = _api_get(session, "/products", {**params, "page": page})
+        batch = resp.json()
+        if not batch:
+            break
+        products.extend(_product_from_api(item, now) for item in batch)
+
+        try:
+            total_pages = int(resp.headers.get("X-WP-TotalPages", page))
+        except ValueError:
+            total_pages = page
+        if page >= total_pages:
+            break
+        page += 1
+        time.sleep(1)
+    return products
+
+
+def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
+    """Fetch products from the WooCommerce Store API, newest first."""
+    session = requests.Session()
+    params = {"per_page": 100, "orderby": "date", "order": "desc"}
+
+    category_ids = _lookup_category_ids(session)
+    if category_ids:
+        products = _fetch_api_pages(
+            session, {**params, "category": ",".join(map(str, category_ids))}, max_pages
+        )
+        if products:
+            logger.info("Store API returned %d product(s) in %r", len(products), CATEGORY_SLUG)
+            return products
+        logger.warning("Category filter matched nothing; retrying unfiltered")
+    else:
+        logger.warning("Could not resolve category %r; fetching unfiltered", CATEGORY_SLUG)
+
+    products = _fetch_api_pages(session, params, max_pages)
+    logger.info("Store API returned %d product(s) unfiltered", len(products))
+    return products
+
+
 def scrape_all_products(max_pages: int = 20) -> list[Product]:
-    """Scrape all pages and return every product found (page 1 first = newest first)."""
+    """Prefer the Store API (structured JSON); fall back to parsing catalog HTML."""
+    if USE_STORE_API:
+        try:
+            products = fetch_products_via_api(max_pages)
+            if products:
+                return products
+            logger.warning("Store API returned no products; falling back to HTML")
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("Store API unavailable (%s); falling back to HTML", exc)
+    return _scrape_html_pages(max_pages)
+
+
+def _scrape_html_pages(max_pages: int = 20) -> list[Product]:
+    """Scrape all catalog pages and return every product found (page 1 first = newest first)."""
     session = requests.Session()
     all_products: list[Product] = []
     url: Optional[str] = BASE_URL

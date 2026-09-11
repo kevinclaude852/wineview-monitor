@@ -46,17 +46,74 @@ RSS feed, but logs a warning instead of sending a Telegram message.
 | `CRON_SECRET`            | no       | —           | If set, `/api/scrape` requires `Authorization: Bearer <secret>` |
 | `PORT`                   | no       | `8080`      | Local server port                                  |
 
+## Where to run it (important)
+
+wineview.com.hk is hosted on SiteGround, whose bot protection challenges
+requests from datacenter IP ranges. Every endpoint — the catalog HTML, both
+RSS feeds, the WordPress REST API, the WooCommerce Store API and the sitemaps
+— returns a 202 with a ~200-byte stub redirecting to `/.well-known/sgcaptcha/`
+when requested from a cloud host. Confirmed from Railway on two different
+egress IPs.
+
+**In practice this means the monitor has to run from a residential
+connection** (a home machine, Raspberry Pi, or NAS), not from Railway/Vercel
+or another cloud provider. Running locally also removes the need for Redis:
+`state.json` sits on a normal filesystem and persists across restarts.
+
+Use `/api/probe` to re-test the endpoints from wherever you deploy it.
+
 ## Run locally
 
+Needs Python 3.9+.
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+
 export TELEGRAM_BOT_TOKEN=...
 export TELEGRAM_CHAT_ID=...
-python main.py
+
+python main.py --once   # single check, then exit (for cron/launchd)
+python main.py          # long-running server + hourly scheduler
 ```
 
-Visit `http://localhost:8080` for the status page, `http://localhost:8080/rss`
-for the feed.
+Without `--once` you get the status page at `http://localhost:8080` and the
+feed at `http://localhost:8080/rss`.
+
+State lives in `state.json` **relative to the working directory**, so always
+run from the repo root (or set `STATE_FILE` to an absolute path).
+
+### Hourly on macOS (launchd)
+
+`deploy/com.wineview.monitor.plist` is a ready-made job. Replace the paths and
+Telegram values in it, then:
+
+```bash
+cp deploy/com.wineview.monitor.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wineview.monitor.plist
+launchctl kickstart -k gui/$(id -u)/com.wineview.monitor   # run now, to test
+```
+
+Check it with `launchctl print gui/$(id -u)/com.wineview.monitor` and
+`tail -f monitor.log`. To stop:
+
+```bash
+launchctl bootout gui/$(id -u)/com.wineview.monitor
+```
+
+launchd is preferred over cron here because it re-runs a job that was missed
+while the Mac was asleep. It still needs the machine to be awake *sometime* —
+on a Mac mini, turn off automatic sleep in System Settings → Energy Saver, or
+the monitor only runs when you happen to wake it.
+
+### Hourly on Linux (cron)
+
+`crontab -e`, then:
+
+```cron
+0 * * * * cd /path/to/wineview-monitor && TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... /path/to/.venv/bin/python main.py --once >> monitor.log 2>&1
+```
 
 ## Deploy
 
