@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -55,6 +56,12 @@ RETRY_DELAY_SECONDS = 3
 API_BASE = "https://wineview.com.hk/wp-json/wc/store/v1"
 CATEGORY_SLUG = "wine-shop"
 USE_STORE_API = os.environ.get("USE_STORE_API", "1") != "0"
+
+USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1") != "0"
+PLAYWRIGHT_HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "1") != "0"
+# Persisted so the bot check's cookie survives between runs.
+PLAYWRIGHT_PROFILE_DIR = os.environ.get("PLAYWRIGHT_PROFILE_DIR", ".playwright-profile")
+BROWSER_TIMEOUT_MS = 45_000
 
 
 @dataclass
@@ -341,69 +348,169 @@ def _collect_category_ids(categories: list[dict], slug: str) -> list[int]:
         wanted |= children
 
 
-def _lookup_category_ids(session: requests.Session) -> list[int]:
-    try:
-        resp = _api_get(session, "/products/categories", {"per_page": 100})
-        return _collect_category_ids(resp.json(), CATEGORY_SLUG)
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("Store API category lookup failed: %s", exc)
-        return []
-
-
-def _fetch_api_pages(session: requests.Session, params: dict, max_pages: int) -> list[Product]:
+def _fetch_api_pages(fetch_json, params: dict, max_pages: int) -> list[Product]:
+    """Page through /products with `fetch_json(path, params) -> (data, total_pages)`."""
     products: list[Product] = []
     now = datetime.now(timezone.utc).isoformat()
     page = 1
     while page <= max_pages:
-        resp = _api_get(session, "/products", {**params, "page": page})
-        batch = resp.json()
+        batch, total_pages = fetch_json("/products", {**params, "page": page})
         if not batch:
             break
         products.extend(_product_from_api(item, now) for item in batch)
 
-        try:
-            total_pages = int(resp.headers.get("X-WP-TotalPages", page))
-        except ValueError:
-            total_pages = page
-        if page >= total_pages:
+        if total_pages is None or page >= total_pages:
             break
         page += 1
         time.sleep(1)
     return products
 
 
-def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
-    """Fetch products from the WooCommerce Store API, newest first."""
-    session = requests.Session()
+def _collect_via_store_api(fetch_json, max_pages: int, source: str) -> list[Product]:
+    """Store API traversal shared by the requests and browser transports."""
     params = {"per_page": 100, "orderby": "date", "order": "desc"}
 
-    category_ids = _lookup_category_ids(session)
+    category_ids = []
+    try:
+        categories, _ = fetch_json("/products/categories", {"per_page": 100})
+        category_ids = _collect_category_ids(categories, CATEGORY_SLUG)
+    except Exception as exc:
+        logger.warning("Store API category lookup failed (%s): %s", source, exc)
+
     if category_ids:
         products = _fetch_api_pages(
-            session, {**params, "category": ",".join(map(str, category_ids))}, max_pages
+            fetch_json, {**params, "category": ",".join(map(str, category_ids))}, max_pages
         )
         if products:
-            logger.info("Store API returned %d product(s) in %r", len(products), CATEGORY_SLUG)
+            logger.info(
+                "Store API (%s) returned %d product(s) in %r", source, len(products), CATEGORY_SLUG
+            )
             return products
         logger.warning("Category filter matched nothing; retrying unfiltered")
     else:
         logger.warning("Could not resolve category %r; fetching unfiltered", CATEGORY_SLUG)
 
-    products = _fetch_api_pages(session, params, max_pages)
-    logger.info("Store API returned %d product(s) unfiltered", len(products))
+    products = _fetch_api_pages(fetch_json, params, max_pages)
+    logger.info("Store API (%s) returned %d product(s) unfiltered", source, len(products))
     return products
 
 
+def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
+    """Fetch products from the Store API over plain HTTP."""
+    session = requests.Session()
+
+    def fetch_json(path: str, params: dict):
+        resp = _api_get(session, path, params)
+        try:
+            total_pages = int(resp.headers.get("X-WP-TotalPages", 0)) or None
+        except ValueError:
+            total_pages = None
+        return resp.json(), total_pages
+
+    return _collect_via_store_api(fetch_json, max_pages, "http")
+
+
+# ---------------------------------------------------------------------------
+# Browser transport
+#
+# The site's bot protection challenges clients that don't look like a browser,
+# so plain HTTP gets a 202 stub redirecting to /.well-known/sgcaptcha/ instead
+# of JSON. Driving a real Chromium lets the check run the same way it does
+# during a manual visit; the persistent profile keeps whatever cookie it sets,
+# so later runs usually aren't challenged at all.
+# ---------------------------------------------------------------------------
+
+def _wait_out_challenge(page, timeout_ms: int = BROWSER_TIMEOUT_MS) -> None:
+    """Give the bot check time to run and hand the browser back to the real page."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        try:
+            if "sgcaptcha" not in page.url and "sgcaptcha" not in page.content():
+                return
+        except Exception:
+            pass  # mid-navigation; look again shortly
+        page.wait_for_timeout(1000)
+    logger.warning("Bot check still present after %.0fs", timeout_ms / 1000)
+
+
+def _browser_fetch_json(page, url: str):
+    """Fetch from inside the page, so it uses the browser's own stack and cookies."""
+    result = page.evaluate(
+        """async (url) => {
+            const resp = await fetch(url, {
+                credentials: 'include',
+                headers: {'Accept': 'application/json'},
+            });
+            return {
+                contentType: resp.headers.get('content-type') || '',
+                totalPages: resp.headers.get('x-wp-totalpages'),
+                body: await resp.text(),
+            };
+        }""",
+        url,
+    )
+    if "json" not in result["contentType"]:
+        raise ValueError(f"expected JSON from {url}, got {result['contentType']!r}")
+
+    try:
+        total_pages = int(result["totalPages"]) or None
+    except (TypeError, ValueError):
+        total_pages = None
+    return json.loads(result["body"]), total_pages
+
+
+def fetch_products_via_browser(max_pages: int = 20) -> list[Product]:
+    """Fetch products from the Store API through a real browser."""
+    from playwright.sync_api import sync_playwright
+
+    profile_dir = Path(PLAYWRIGHT_PROFILE_DIR).expanduser()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            str(profile_dir),
+            headless=PLAYWRIGHT_HEADLESS,
+            locale="en-US",
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            # Load a normal page first so the check runs on a real navigation.
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT_MS)
+            _wait_out_challenge(page)
+
+            def fetch_json(path: str, params: dict):
+                return _browser_fetch_json(page, f"{API_BASE}{path}?{urlencode(params)}")
+
+            return _collect_via_store_api(fetch_json, max_pages, "browser")
+        finally:
+            context.close()
+
+
 def scrape_all_products(max_pages: int = 20) -> list[Product]:
-    """Prefer the Store API (structured JSON); fall back to parsing catalog HTML."""
+    """Store API over HTTP, then through a browser, then HTML scraping."""
     if USE_STORE_API:
         try:
             products = fetch_products_via_api(max_pages)
             if products:
                 return products
-            logger.warning("Store API returned no products; falling back to HTML")
+            logger.warning("Store API returned no products over HTTP")
         except (requests.RequestException, ValueError) as exc:
-            logger.warning("Store API unavailable (%s); falling back to HTML", exc)
+            logger.warning("Store API unavailable over HTTP (%s)", exc)
+
+    if USE_PLAYWRIGHT:
+        try:
+            products = fetch_products_via_browser(max_pages)
+            if products:
+                return products
+            logger.warning("Store API returned no products via browser")
+        except ImportError:
+            logger.warning(
+                "playwright not installed; run 'pip install playwright && playwright install chromium'"
+            )
+        except Exception as exc:
+            logger.warning("Browser fetch failed (%s)", exc)
+
+    logger.info("Falling back to HTML scraping")
     return _scrape_html_pages(max_pages)
 
 

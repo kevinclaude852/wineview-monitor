@@ -62,6 +62,28 @@ or another cloud provider. Running locally also removes the need for Redis:
 
 Use `/api/probe` to re-test the endpoints from wherever you deploy it.
 
+### How products are fetched
+
+`scrape_all_products()` tries three transports in order:
+
+1. **Store API over HTTP** — structured JSON, no browser needed. Currently
+   rejected by the bot check, but kept as the cheap path in case that changes.
+2. **Store API through a real browser** (Playwright/Chromium) — the check runs
+   the same way it does during a manual visit, and the JSON is fetched from
+   inside the page so it uses the browser's own cookies and network stack. The
+   profile in `.playwright-profile/` persists, so later runs usually aren't
+   challenged at all.
+3. **HTML scraping** — legacy fallback; prices have to be parsed out of
+   display text and there are no country/region/grape attributes.
+
+Relevant env vars: `USE_STORE_API=0` skips (1), `USE_PLAYWRIGHT=0` skips (2),
+`PLAYWRIGHT_HEADLESS=0` shows the browser window, and
+`PLAYWRIGHT_PROFILE_DIR` moves the profile.
+
+If the check ever presents an interactive challenge, run once with
+`PLAYWRIGHT_HEADLESS=0`, clear it by hand, and the saved profile carries the
+result into subsequent headless runs.
+
 ## Run locally
 
 Needs Python 3.9+.
@@ -70,6 +92,10 @@ Needs Python 3.9+.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Required here: plain HTTP requests are rejected by the site's bot check
+pip install -r requirements-browser.txt
+playwright install chromium
 
 export TELEGRAM_BOT_TOKEN=...
 export TELEGRAM_CHAT_ID=...
