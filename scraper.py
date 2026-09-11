@@ -57,6 +57,11 @@ API_BASE = "https://wineview.com.hk/wp-json/wc/store/v1"
 CATEGORY_SLUG = "wine-shop"
 USE_STORE_API = os.environ.get("USE_STORE_API", "1") != "0"
 
+API_MAX_PER_PAGE = 100  # Store API caps per_page at 100
+# Results are newest-first, so only the top slice can contain anything new
+# since the last hourly run. Fetching the whole catalogue every hour is waste.
+PRODUCT_LIMIT = int(os.environ.get("PRODUCT_LIMIT", "100"))
+
 USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1") != "0"
 PLAYWRIGHT_HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "1") != "0"
 # Persisted so the bot check's cookie survives between runs.
@@ -348,12 +353,18 @@ def _collect_category_ids(categories: list[dict], slug: str) -> list[int]:
         wanted |= children
 
 
-def _fetch_api_pages(fetch_json, params: dict, max_pages: int) -> list[Product]:
-    """Page through /products with `fetch_json(path, params) -> (data, total_pages)`."""
+def _fetch_api_pages(fetch_json, params: dict, max_products: int) -> list[Product]:
+    """
+    Page through /products until `max_products` are collected.
+
+    Results are newest-first, so the first page already holds anything that
+    could be new since the last run — there's no reason to walk the whole
+    catalogue every hour.
+    """
     products: list[Product] = []
     now = datetime.now(timezone.utc).isoformat()
     page = 1
-    while page <= max_pages:
+    while len(products) < max_products:
         batch, total_pages = fetch_json("/products", {**params, "page": page})
         if not batch:
             break
@@ -363,23 +374,29 @@ def _fetch_api_pages(fetch_json, params: dict, max_pages: int) -> list[Product]:
             break
         page += 1
         time.sleep(1)
-    return products
+    return products[:max_products]
 
 
-def _collect_via_store_api(fetch_json, max_pages: int, source: str) -> list[Product]:
+def _collect_via_store_api(fetch_json, max_products: int, source: str) -> list[Product]:
     """Store API traversal shared by the requests and browser transports."""
-    params = {"per_page": 100, "orderby": "date", "order": "desc"}
+    params = {
+        "per_page": min(max_products, API_MAX_PER_PAGE),
+        "orderby": "date",
+        "order": "desc",
+    }
 
     category_ids = []
     try:
-        categories, _ = fetch_json("/products/categories", {"per_page": 100})
+        categories, _ = fetch_json("/products/categories", {"per_page": API_MAX_PER_PAGE})
         category_ids = _collect_category_ids(categories, CATEGORY_SLUG)
     except Exception as exc:
         logger.warning("Store API category lookup failed (%s): %s", source, exc)
 
     if category_ids:
         products = _fetch_api_pages(
-            fetch_json, {**params, "category": ",".join(map(str, category_ids))}, max_pages
+            fetch_json,
+            {**params, "category": ",".join(map(str, category_ids))},
+            max_products,
         )
         if products:
             logger.info(
@@ -390,12 +407,12 @@ def _collect_via_store_api(fetch_json, max_pages: int, source: str) -> list[Prod
     else:
         logger.warning("Could not resolve category %r; fetching unfiltered", CATEGORY_SLUG)
 
-    products = _fetch_api_pages(fetch_json, params, max_pages)
+    products = _fetch_api_pages(fetch_json, params, max_products)
     logger.info("Store API (%s) returned %d product(s) unfiltered", source, len(products))
     return products
 
 
-def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
+def fetch_products_via_api(max_products: int = PRODUCT_LIMIT) -> list[Product]:
     """Fetch products from the Store API over plain HTTP."""
     session = requests.Session()
 
@@ -407,7 +424,7 @@ def fetch_products_via_api(max_pages: int = 20) -> list[Product]:
             total_pages = None
         return resp.json(), total_pages
 
-    return _collect_via_store_api(fetch_json, max_pages, "http")
+    return _collect_via_store_api(fetch_json, max_products, "http")
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +476,7 @@ def _browser_fetch_json(page, url: str):
     return json.loads(result["body"]), total_pages
 
 
-def fetch_products_via_browser(max_pages: int = 20) -> list[Product]:
+def fetch_products_via_browser(max_products: int = PRODUCT_LIMIT) -> list[Product]:
     """Fetch products from the Store API through a real browser."""
     from playwright.sync_api import sync_playwright
 
@@ -481,16 +498,16 @@ def fetch_products_via_browser(max_pages: int = 20) -> list[Product]:
             def fetch_json(path: str, params: dict):
                 return _browser_fetch_json(page, f"{API_BASE}{path}?{urlencode(params)}")
 
-            return _collect_via_store_api(fetch_json, max_pages, "browser")
+            return _collect_via_store_api(fetch_json, max_products, "browser")
         finally:
             context.close()
 
 
-def scrape_all_products(max_pages: int = 20) -> list[Product]:
+def scrape_all_products(max_products: int = PRODUCT_LIMIT) -> list[Product]:
     """Store API over HTTP, then through a browser, then HTML scraping."""
     if USE_STORE_API:
         try:
-            products = fetch_products_via_api(max_pages)
+            products = fetch_products_via_api(max_products)
             if products:
                 return products
             logger.warning("Store API returned no products over HTTP")
@@ -499,7 +516,7 @@ def scrape_all_products(max_pages: int = 20) -> list[Product]:
 
     if USE_PLAYWRIGHT:
         try:
-            products = fetch_products_via_browser(max_pages)
+            products = fetch_products_via_browser(max_products)
             if products:
                 return products
             logger.warning("Store API returned no products via browser")
@@ -511,17 +528,17 @@ def scrape_all_products(max_pages: int = 20) -> list[Product]:
             logger.warning("Browser fetch failed (%s)", exc)
 
     logger.info("Falling back to HTML scraping")
-    return _scrape_html_pages(max_pages)
+    return _scrape_html_pages(max_products)
 
 
-def _scrape_html_pages(max_pages: int = 20) -> list[Product]:
-    """Scrape all catalog pages and return every product found (page 1 first = newest first)."""
+def _scrape_html_pages(max_products: int = PRODUCT_LIMIT) -> list[Product]:
+    """Scrape catalog pages newest-first until max_products have been collected."""
     session = requests.Session()
     all_products: list[Product] = []
     url: Optional[str] = BASE_URL
     page = 0
 
-    while url and page < max_pages:
+    while url and len(all_products) < max_products:
         logger.info("Scraping page %d: %s", page + 1, url)
         products, next_url = _scrape_page(session, url)
         all_products.extend(products)
@@ -530,6 +547,7 @@ def _scrape_html_pages(max_pages: int = 20) -> list[Product]:
         if next_url:
             time.sleep(1)  # polite crawl delay
 
+    all_products = all_products[:max_products]
     logger.info("Total products scraped: %d", len(all_products))
     return all_products
 

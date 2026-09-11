@@ -76,9 +76,14 @@ Use `/api/probe` to re-test the endpoints from wherever you deploy it.
 3. **HTML scraping** — legacy fallback; prices have to be parsed out of
    display text and there are no country/region/grape attributes.
 
-Relevant env vars: `USE_STORE_API=0` skips (1), `USE_PLAYWRIGHT=0` skips (2),
-`PLAYWRIGHT_HEADLESS=0` shows the browser window, and
-`PLAYWRIGHT_PROFILE_DIR` moves the profile.
+Only the newest `PRODUCT_LIMIT` products (default 100, one API page) are
+fetched each run. Results are newest-first, so anything added since the last
+hourly check is in that slice; walking the full ~1500-product catalogue every
+hour would be pure waste, and the RSS feed only keeps 100 items anyway.
+
+Relevant env vars: `PRODUCT_LIMIT` sizes that window, `USE_STORE_API=0` skips
+(1), `USE_PLAYWRIGHT=0` skips (2), `PLAYWRIGHT_HEADLESS=0` shows the browser
+window, and `PLAYWRIGHT_PROFILE_DIR` moves the profile.
 
 If the check ever presents an interactive challenge, run once with
 `PLAYWRIGHT_HEADLESS=0`, clear it by hand, and the saved profile carries the
