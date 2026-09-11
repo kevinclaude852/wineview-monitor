@@ -122,8 +122,19 @@ Telegram values in it, then:
 
 ```bash
 cp deploy/com.wineview.monitor.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wineview.monitor.plist
+PLIST=~/Library/LaunchAgents/com.wineview.monitor.plist
+sed -i '' "s|__REPO_DIR__|$PWD|g" "$PLIST"
+# now edit "$PLIST" and fill in the two REPLACE_WITH_ values
+launchctl bootstrap gui/$(id -u) "$PLIST"
 launchctl kickstart -k gui/$(id -u)/com.wineview.monitor   # run now, to test
+```
+
+launchd caches the job when it is bootstrapped, so after editing the plist you
+have to reload it — `kickstart` on its own keeps running the cached copy:
+
+```bash
+launchctl bootout gui/$(id -u)/com.wineview.monitor
+launchctl bootstrap gui/$(id -u) "$PLIST"
 ```
 
 Check it with `launchctl print gui/$(id -u)/com.wineview.monitor` and
