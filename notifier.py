@@ -41,7 +41,8 @@ def _clean_amount(raw_amount: str) -> str:
 
 
 def _sale_block(regular: str, current: str) -> str:
-    return f"~{_escape_md(_clean_amount(regular))}~\n_{_escape_md(_clean_amount(current))}_"
+    """Struck-through original and italic current price, on one line."""
+    return f"~{_escape_md(_clean_amount(regular))}~  _{_escape_md(_clean_amount(current))}_"
 
 
 def _format_price_block(product: Product) -> str:
