@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: run the monitor once an hour on macOS.
+
+  Replace every /ABSOLUTE/PATH/TO/wineview-monitor and the two Telegram
+  values, then install with:
+
+      cp deploy/com.wineview.monitor.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wineview.monitor.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wineview.monitor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ABSOLUTE/PATH/TO/wineview-monitor/.venv/bin/python</string>
+        <string>main.py</string>
+        <string>--once</string>
+    </array>
+
+    <!-- state.json and monitor.log are written relative to this directory -->
+    <key>WorkingDirectory</key>
+    <string>/ABSOLUTE/PATH/TO/wineview-monitor</string>
+
+    <!-- launchd does not inherit your shell environment -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TELEGRAM_BOT_TOKEN</key>
+        <string>REPLACE_WITH_BOT_TOKEN</string>
+        <key>TELEGRAM_CHAT_ID</key>
+        <string>REPLACE_WITH_CHAT_ID</string>
+    </dict>
+
+    <!-- Every hour, on the hour. If the Mac is asleep at that moment,
+         launchd runs the job once after it wakes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/ABSOLUTE/PATH/TO/wineview-monitor/monitor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/ABSOLUTE/PATH/TO/wineview-monitor/monitor.log</string>
+</dict>
+</plist>
