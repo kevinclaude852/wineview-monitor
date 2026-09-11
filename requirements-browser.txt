@@ -1,3 +1,7 @@
 # Optional: browser transport for sites whose bot protection rejects plain HTTP.
 # After installing, fetch the browser binary once:  playwright install chromium
-playwright==1.47.0
+#
+# Deliberately not pinned to an exact version: playwright <1.49 hard-pins
+# greenlet==3.0.3, which ships no wheel for Python 3.12+ and fails to build
+# from source there. 1.49+ requires greenlet>=3.1.1, which has them.
+playwright>=1.49
