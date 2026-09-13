@@ -76,27 +76,13 @@ Use `/api/probe` to re-test the endpoints from wherever you deploy it.
 3. **HTML scraping** — backup only; prices have to be parsed out of display
    text and there are no country/region/grape attributes.
 
-Both API transports hit the same endpoint, with no preamble:
+Both API transports hit the same endpoint:
 
-    /wp-json/wc/store/v1/products?per_page=100&orderby=date&order=desc&category=405&page=1
+    /wp-json/wc/store/v1/products?per_page=30&orderby=date&order=desc&page=1
 
-Category 405 is "All Wines" (slug `wine-shop`), the parent of red-wine,
-white-wine, sparkling-wine, sake, spirits and the rest. The Store API filters
-by term ID rather than slug and a parent matches its descendants, so this one
-value covers the whole wine catalogue while leaving out accessories, wine
-fridges and uncategorised items — no category lookup request needed. Override
-with `WINE_CATEGORY_ID`.
-
-Filtering server-side also means the newest 100 are 100 *wines*; filtering
-after the fact would let accessories eat into that window. If the ID ever goes
-stale the request returns nothing, so the code retries unfiltered and falls
-back to checking each product's own `/product-category/wine-shop/...` category
-link — reporting too much beats going silent.
-
-Only the newest `PRODUCT_LIMIT` products (default 100, one API page) are
-fetched each run. Results are newest-first, so anything added since the last
-hourly check is in that slice; walking the full ~1500-product catalogue every
-hour would be pure waste, and the RSS feed only keeps 100 items anyway.
+The newest `PRODUCT_LIMIT` products (default 30, one page). Results are
+newest-first, so anything added since the last run is in that slice. No
+category filtering: everything the shop lists is reported.
 
 Relevant env vars: `PRODUCT_LIMIT` sizes that window, `USE_STORE_API=0` skips
 (1), `USE_PLAYWRIGHT=0` skips (2), `PLAYWRIGHT_HEADLESS=0` shows the browser

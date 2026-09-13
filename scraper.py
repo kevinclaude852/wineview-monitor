@@ -54,20 +54,12 @@ RETRY_DELAY_SECONDS = 3
 
 
 API_BASE = "https://wineview.com.hk/wp-json/wc/store/v1"
-CATEGORY_SLUG = "wine-shop"
-# 'All Wines' (slug wine-shop), the parent of every wine subcategory —
-# red-wine, white-wine, sake, spirits and so on. The Store API filters by term
-# ID rather than slug, and a parent ID matches its descendants, so this one
-# constant covers the whole wine catalogue and excludes accessories, wine
-# fridges and uncategorised items. Stable enough to hard-code; override with
-# WINE_CATEGORY_ID if the shop ever rebuilds its categories.
-WINE_CATEGORY_ID = os.environ.get("WINE_CATEGORY_ID", "405")
 USE_STORE_API = os.environ.get("USE_STORE_API", "1") != "0"
 
 API_MAX_PER_PAGE = 100  # Store API caps per_page at 100
 # Results are newest-first, so only the top slice can contain anything new
 # since the last hourly run. Fetching the whole catalogue every hour is waste.
-PRODUCT_LIMIT = int(os.environ.get("PRODUCT_LIMIT", "100"))
+PRODUCT_LIMIT = int(os.environ.get("PRODUCT_LIMIT", "30"))
 
 USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1") != "0"
 PLAYWRIGHT_HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "1") != "0"
@@ -336,29 +328,14 @@ def _product_from_api(item: dict, now: str) -> Product:
     )
 
 
-def _in_wine_shop(item: dict) -> bool:
-    """
-    Whether a product sits under the wine-shop category.
+def _collect_via_store_api(fetch_json, max_products: int, source: str) -> list[Product]:
+    """The newest products from the Store API, newest first."""
+    params = {
+        "per_page": min(max_products, API_MAX_PER_PAGE),
+        "orderby": "date",
+        "order": "desc",
+    }
 
-    Products are tagged only with the child categories (red-wine, white-wine,
-    ...), never with wine-shop itself, but each category carries a link like
-    '/product-category/wine-shop/white-wine/' — so membership can be read off
-    the response instead of costing a separate category-lookup request.
-    """
-    for category in item.get("categories") or []:
-        if f"/product-category/{CATEGORY_SLUG}/" in (category.get("link") or ""):
-            return True
-    return False
-
-
-def _fetch_api_pages(fetch_json, params: dict, max_products: int) -> list[Product]:
-    """
-    Page through /products until `max_products` are collected.
-
-    Results are newest-first, so the first page already holds anything that
-    could be new since the last run — there's no reason to walk the whole
-    catalogue every hour.
-    """
     items: list[dict] = []
     page = 1
     while len(items) < max_products:
@@ -372,39 +349,9 @@ def _fetch_api_pages(fetch_json, params: dict, max_products: int) -> list[Produc
         page += 1
         time.sleep(1)
 
-    wine = [item for item in items if _in_wine_shop(item)]
-    dropped = len(items) - len(wine)
-    if dropped:
-        logger.info("Ignored %d product(s) outside %r", dropped, CATEGORY_SLUG)
-    # Fail open: if nothing matched, the category shape probably changed, and
-    # reporting everything is far better than silently reporting nothing.
-    if items and not wine:
-        logger.warning("No product matched %r; keeping all of them", CATEGORY_SLUG)
-        wine = items
-
     now = datetime.now(timezone.utc).isoformat()
-    return [_product_from_api(item, now) for item in wine[:max_products]]
-
-
-def _collect_via_store_api(fetch_json, max_products: int, source: str) -> list[Product]:
-    """Fetch the newest wines straight from /products — no category preamble."""
-    params = {
-        "per_page": min(max_products, API_MAX_PER_PAGE),
-        "orderby": "date",
-        "order": "desc",
-    }
-
-    products = _fetch_api_pages(fetch_json, {**params, "category": WINE_CATEGORY_ID}, max_products)
-    if products:
-        logger.info("Store API (%s) returned %d wine(s)", source, len(products))
-        return products
-
-    # Only reachable if the category ID has gone stale. Ask for everything and
-    # let the per-product category check sort the wines out, rather than
-    # reporting nothing at all.
-    logger.warning("Category %s matched nothing; retrying unfiltered", WINE_CATEGORY_ID)
-    products = _fetch_api_pages(fetch_json, params, max_products)
-    logger.info("Store API (%s) returned %d product(s) unfiltered", source, len(products))
+    products = [_product_from_api(item, now) for item in items[:max_products]]
+    logger.info("Store API (%s) returned %d product(s)", source, len(products))
     return products
 
 
