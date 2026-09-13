@@ -611,8 +611,12 @@ def save_state(products: list[Product]) -> None:
 def detect_new_products() -> tuple[list[Product], list[Product]]:
     """
     Scrape site, compare with saved state.
-    Returns (new_products, all_products).
-    new_products are ordered newest-first (page order).
+    Returns (new_products, all_products), newest-first.
+
+    Deliberately does not persist: the caller commits with save_state() once
+    any notification has actually been delivered. Saving here would mark
+    products as seen even when the notification failed, losing the alert for
+    good.
     """
     previous = load_state()
     current = scrape_all_products()
@@ -661,5 +665,4 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
     else:
         logger.info("No new products detected")
 
-    save_state(current)
     return new_products, current

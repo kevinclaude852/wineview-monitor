@@ -93,16 +93,24 @@ def _format_message(products: list[Product]) -> str:
     return header + "\n" + "\n\n".join(entries)
 
 
-def send_new_products(products: list[Product]) -> None:
-    """Send a Telegram message listing newly detected products, if configured."""
+def send_new_products(products: list[Product]) -> bool:
+    """
+    Send a Telegram message listing newly detected products.
+
+    Returns True when there was nothing to deliver or the message was sent,
+    False only when a send was attempted and failed — the caller uses that to
+    decide whether it is safe to mark these products as seen.
+    """
     if not products:
-        return
+        return True
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        # Not configured is a deliberate choice, not a delivery failure;
+        # retrying forever would just re-report the same products.
         logger.warning(
             "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set; skipping notification for %d new product(s)",
             len(products),
         )
-        return
+        return True
 
     text = _format_message(products)
     url = TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN)
@@ -119,5 +127,7 @@ def send_new_products(products: list[Product]) -> None:
         )
         resp.raise_for_status()
         logger.info("Sent Telegram notification for %d new product(s)", len(products))
+        return True
     except requests.RequestException:
         logger.exception("Failed to send Telegram notification")
+        return False

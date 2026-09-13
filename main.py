@@ -16,7 +16,14 @@ from flask import Flask, Response, request
 
 import notifier
 import rss
-from scraper import detect_new_products, load_state, inspect_page, probe_endpoints, Product
+from scraper import (
+    detect_new_products,
+    inspect_page,
+    load_state,
+    probe_endpoints,
+    save_state,
+    Product,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,11 +58,22 @@ def scrape_job() -> None:
     logger.info("Scrape job started")
     try:
         new_products, all_products = detect_new_products()
+        if not all_products:
+            return  # failed fetch; prior state left untouched
+
         rss.add_new_products(new_products)
         if new_products:
-            notifier.send_new_products(new_products)
+            if not notifier.send_new_products(new_products):
+                # Leave state unsaved so these are reported again next run
+                # rather than being silently marked as seen.
+                logger.warning(
+                    "Notification failed; %d product(s) left unsaved to retry next run",
+                    len(new_products),
+                )
+                return
         else:
             rss.load_from_state(all_products)
+        save_state(all_products)
     except Exception:
         logger.exception("Scrape job failed")
 
