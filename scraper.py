@@ -59,7 +59,7 @@ USE_STORE_API = os.environ.get("USE_STORE_API", "1") != "0"
 API_MAX_PER_PAGE = 100  # Store API caps per_page at 100
 # Results are newest-first, so only the top slice can contain anything new
 # since the last hourly run. Fetching the whole catalogue every hour is waste.
-PRODUCT_LIMIT = int(os.environ.get("PRODUCT_LIMIT", "30"))
+PRODUCT_LIMIT = int(os.environ.get("PRODUCT_LIMIT", "100"))
 
 USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1") != "0"
 PLAYWRIGHT_HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "1") != "0"

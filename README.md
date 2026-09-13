@@ -78,9 +78,9 @@ Use `/api/probe` to re-test the endpoints from wherever you deploy it.
 
 Both API transports hit the same endpoint:
 
-    /wp-json/wc/store/v1/products?per_page=30&orderby=date&order=desc&page=1
+    /wp-json/wc/store/v1/products?per_page=100&orderby=date&order=desc&page=1
 
-The newest `PRODUCT_LIMIT` products (default 30, one page). Results are
+The newest `PRODUCT_LIMIT` products (default 100, one page). Results are
 newest-first, so anything added since the last run is in that slice. No
 category filtering: everything the shop lists is reported.
 
