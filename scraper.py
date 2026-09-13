@@ -329,28 +329,19 @@ def _product_from_api(item: dict, now: str) -> Product:
     )
 
 
-def _collect_category_ids(categories: list[dict], slug: str) -> list[int]:
+def _in_wine_shop(item: dict) -> bool:
     """
-    IDs for `slug` plus every category beneath it.
+    Whether a product sits under the wine-shop category.
 
-    'wine-shop' is a parent category — products are tagged only with its
-    children (red-wine, white-wine, ...), so filtering on the parent ID alone
-    can match nothing.
+    Products are tagged only with the child categories (red-wine, white-wine,
+    ...), never with wine-shop itself, but each category carries a link like
+    '/product-category/wine-shop/white-wine/' — so membership can be read off
+    the response instead of costing a separate category-lookup request.
     """
-    root = next((c for c in categories if c.get("slug") == slug), None)
-    if not root:
-        return []
-
-    wanted = {root["id"]}
-    # Walk down the tree until no new children are found (depth is unknown).
-    while True:
-        children = {
-            c["id"] for c in categories
-            if c.get("parent") in wanted and c["id"] not in wanted
-        }
-        if not children:
-            return sorted(wanted)
-        wanted |= children
+    for category in item.get("categories") or []:
+        if f"/product-category/{CATEGORY_SLUG}/" in (category.get("link") or ""):
+            return True
+    return False
 
 
 def _fetch_api_pages(fetch_json, params: dict, max_products: int) -> list[Product]:
@@ -361,54 +352,41 @@ def _fetch_api_pages(fetch_json, params: dict, max_products: int) -> list[Produc
     could be new since the last run — there's no reason to walk the whole
     catalogue every hour.
     """
-    products: list[Product] = []
-    now = datetime.now(timezone.utc).isoformat()
+    items: list[dict] = []
     page = 1
-    while len(products) < max_products:
+    while len(items) < max_products:
         batch, total_pages = fetch_json("/products", {**params, "page": page})
         if not batch:
             break
-        products.extend(_product_from_api(item, now) for item in batch)
+        items.extend(batch)
 
         if total_pages is None or page >= total_pages:
             break
         page += 1
         time.sleep(1)
-    return products[:max_products]
+
+    wine = [item for item in items if _in_wine_shop(item)]
+    dropped = len(items) - len(wine)
+    if dropped:
+        logger.info("Ignored %d product(s) outside %r", dropped, CATEGORY_SLUG)
+    # Fail open: if nothing matched, the category shape probably changed, and
+    # reporting everything is far better than silently reporting nothing.
+    if items and not wine:
+        logger.warning("No product matched %r; keeping all of them", CATEGORY_SLUG)
+        wine = items
+
+    now = datetime.now(timezone.utc).isoformat()
+    return [_product_from_api(item, now) for item in wine[:max_products]]
 
 
 def _collect_via_store_api(fetch_json, max_products: int, source: str) -> list[Product]:
-    """Store API traversal shared by the requests and browser transports."""
-    params = {
-        "per_page": min(max_products, API_MAX_PER_PAGE),
-        "orderby": "date",
-        "order": "desc",
-    }
-
-    category_ids = []
-    try:
-        categories, _ = fetch_json("/products/categories", {"per_page": API_MAX_PER_PAGE})
-        category_ids = _collect_category_ids(categories, CATEGORY_SLUG)
-    except Exception as exc:
-        logger.warning("Store API category lookup failed (%s): %s", source, exc)
-
-    if category_ids:
-        products = _fetch_api_pages(
-            fetch_json,
-            {**params, "category": ",".join(map(str, category_ids))},
-            max_products,
-        )
-        if products:
-            logger.info(
-                "Store API (%s) returned %d product(s) in %r", source, len(products), CATEGORY_SLUG
-            )
-            return products
-        logger.warning("Category filter matched nothing; retrying unfiltered")
-    else:
-        logger.warning("Could not resolve category %r; fetching unfiltered", CATEGORY_SLUG)
-
-    products = _fetch_api_pages(fetch_json, params, max_products)
-    logger.info("Store API (%s) returned %d product(s) unfiltered", source, len(products))
+    """Fetch the newest products straight from /products — no category preamble."""
+    products = _fetch_api_pages(
+        fetch_json,
+        {"per_page": min(max_products, API_MAX_PER_PAGE), "orderby": "date", "order": "desc"},
+        max_products,
+    )
+    logger.info("Store API (%s) returned %d product(s)", source, len(products))
     return products
 
 
@@ -510,9 +488,11 @@ def scrape_all_products(max_products: int = PRODUCT_LIMIT) -> list[Product]:
             products = fetch_products_via_api(max_products)
             if products:
                 return products
-            logger.warning("Store API returned no products over HTTP")
+            logger.info("Store API returned no products over HTTP; trying browser")
         except (requests.RequestException, ValueError) as exc:
-            logger.warning("Store API unavailable over HTTP (%s)", exc)
+            # Expected on every run while the site's bot check is active, so
+            # this is routine rather than something to shout about.
+            logger.info("Store API not reachable over HTTP (%s); trying browser", exc)
 
     if USE_PLAYWRIGHT:
         try:

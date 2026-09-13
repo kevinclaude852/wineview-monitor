@@ -73,8 +73,17 @@ Use `/api/probe` to re-test the endpoints from wherever you deploy it.
    inside the page so it uses the browser's own cookies and network stack. The
    profile in `.playwright-profile/` persists, so later runs usually aren't
    challenged at all.
-3. **HTML scraping** — legacy fallback; prices have to be parsed out of
-   display text and there are no country/region/grape attributes.
+3. **HTML scraping** — backup only; prices have to be parsed out of display
+   text and there are no country/region/grape attributes.
+
+Both API transports hit the same endpoint, with no preamble:
+
+    /wp-json/wc/store/v1/products?per_page=100&orderby=date&order=desc&page=1
+
+Products outside wine-shop are dropped from the response rather than filtered
+server-side, since each category carries a `/product-category/wine-shop/...`
+link — one request instead of two. If nothing matches (the category shape
+changed), everything is kept rather than reporting nothing.
 
 Only the newest `PRODUCT_LIMIT` products (default 100, one API page) are
 fetched each run. Results are newest-first, so anything added since the last
