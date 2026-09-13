@@ -55,6 +55,13 @@ RETRY_DELAY_SECONDS = 3
 
 API_BASE = "https://wineview.com.hk/wp-json/wc/store/v1"
 CATEGORY_SLUG = "wine-shop"
+# 'All Wines' (slug wine-shop), the parent of every wine subcategory —
+# red-wine, white-wine, sake, spirits and so on. The Store API filters by term
+# ID rather than slug, and a parent ID matches its descendants, so this one
+# constant covers the whole wine catalogue and excludes accessories, wine
+# fridges and uncategorised items. Stable enough to hard-code; override with
+# WINE_CATEGORY_ID if the shop ever rebuilds its categories.
+WINE_CATEGORY_ID = os.environ.get("WINE_CATEGORY_ID", "405")
 USE_STORE_API = os.environ.get("USE_STORE_API", "1") != "0"
 
 API_MAX_PER_PAGE = 100  # Store API caps per_page at 100
@@ -380,13 +387,24 @@ def _fetch_api_pages(fetch_json, params: dict, max_products: int) -> list[Produc
 
 
 def _collect_via_store_api(fetch_json, max_products: int, source: str) -> list[Product]:
-    """Fetch the newest products straight from /products — no category preamble."""
-    products = _fetch_api_pages(
-        fetch_json,
-        {"per_page": min(max_products, API_MAX_PER_PAGE), "orderby": "date", "order": "desc"},
-        max_products,
-    )
-    logger.info("Store API (%s) returned %d product(s)", source, len(products))
+    """Fetch the newest wines straight from /products — no category preamble."""
+    params = {
+        "per_page": min(max_products, API_MAX_PER_PAGE),
+        "orderby": "date",
+        "order": "desc",
+    }
+
+    products = _fetch_api_pages(fetch_json, {**params, "category": WINE_CATEGORY_ID}, max_products)
+    if products:
+        logger.info("Store API (%s) returned %d wine(s)", source, len(products))
+        return products
+
+    # Only reachable if the category ID has gone stale. Ask for everything and
+    # let the per-product category check sort the wines out, rather than
+    # reporting nothing at all.
+    logger.warning("Category %s matched nothing; retrying unfiltered", WINE_CATEGORY_ID)
+    products = _fetch_api_pages(fetch_json, params, max_products)
+    logger.info("Store API (%s) returned %d product(s) unfiltered", source, len(products))
     return products
 
 

@@ -78,12 +78,20 @@ Use `/api/probe` to re-test the endpoints from wherever you deploy it.
 
 Both API transports hit the same endpoint, with no preamble:
 
-    /wp-json/wc/store/v1/products?per_page=100&orderby=date&order=desc&page=1
+    /wp-json/wc/store/v1/products?per_page=100&orderby=date&order=desc&category=405&page=1
 
-Products outside wine-shop are dropped from the response rather than filtered
-server-side, since each category carries a `/product-category/wine-shop/...`
-link — one request instead of two. If nothing matches (the category shape
-changed), everything is kept rather than reporting nothing.
+Category 405 is "All Wines" (slug `wine-shop`), the parent of red-wine,
+white-wine, sparkling-wine, sake, spirits and the rest. The Store API filters
+by term ID rather than slug and a parent matches its descendants, so this one
+value covers the whole wine catalogue while leaving out accessories, wine
+fridges and uncategorised items — no category lookup request needed. Override
+with `WINE_CATEGORY_ID`.
+
+Filtering server-side also means the newest 100 are 100 *wines*; filtering
+after the fact would let accessories eat into that window. If the ID ever goes
+stale the request returns nothing, so the code retries unfiltered and falls
+back to checking each product's own `/product-category/wine-shop/...` category
+link — reporting too much beats going silent.
 
 Only the newest `PRODUCT_LIMIT` products (default 100, one API page) are
 fetched each run. Results are newest-first, so anything added since the last
