@@ -62,6 +62,36 @@ or another cloud provider. Running locally also removes the need for Redis:
 
 Use `/api/probe` to re-test the endpoints from wherever you deploy it.
 
+### How products are fetched
+
+`scrape_all_products()` tries three transports in order:
+
+1. **Store API over HTTP** — structured JSON, no browser needed. Currently
+   rejected by the bot check, but kept as the cheap path in case that changes.
+2. **Store API through a real browser** (Playwright/Chromium) — the check runs
+   the same way it does during a manual visit, and the JSON is fetched from
+   inside the page so it uses the browser's own cookies and network stack. The
+   profile in `.playwright-profile/` persists, so later runs usually aren't
+   challenged at all.
+3. **HTML scraping** — backup only; prices have to be parsed out of display
+   text and there are no country/region/grape attributes.
+
+Both API transports hit the same endpoint:
+
+    /wp-json/wc/store/v1/products?per_page=30&orderby=date&order=desc&page=1
+
+The newest `PRODUCT_LIMIT` products (default 30, one page). Results are
+newest-first, so anything added since the last run is in that slice. No
+category filtering: everything the shop lists is reported.
+
+Relevant env vars: `PRODUCT_LIMIT` sizes that window, `USE_STORE_API=0` skips
+(1), `USE_PLAYWRIGHT=0` skips (2), `PLAYWRIGHT_HEADLESS=0` shows the browser
+window, and `PLAYWRIGHT_PROFILE_DIR` moves the profile.
+
+If the check ever presents an interactive challenge, run once with
+`PLAYWRIGHT_HEADLESS=0`, clear it by hand, and the saved profile carries the
+result into subsequent headless runs.
+
 ## Run locally
 
 Needs Python 3.9+.
@@ -70,6 +100,10 @@ Needs Python 3.9+.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Required here: plain HTTP requests are rejected by the site's bot check
+pip install -r requirements-browser.txt
+playwright install chromium
 
 export TELEGRAM_BOT_TOKEN=...
 export TELEGRAM_CHAT_ID=...
@@ -91,8 +125,19 @@ Telegram values in it, then:
 
 ```bash
 cp deploy/com.wineview.monitor.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wineview.monitor.plist
+PLIST=~/Library/LaunchAgents/com.wineview.monitor.plist
+sed -i '' "s|__REPO_DIR__|$PWD|g" "$PLIST"
+# now edit "$PLIST" and fill in the two REPLACE_WITH_ values
+launchctl bootstrap gui/$(id -u) "$PLIST"
 launchctl kickstart -k gui/$(id -u)/com.wineview.monitor   # run now, to test
+```
+
+launchd caches the job when it is bootstrapped, so after editing the plist you
+have to reload it — `kickstart` on its own keeps running the cached copy:
+
+```bash
+launchctl bootout gui/$(id -u)/com.wineview.monitor
+launchctl bootstrap gui/$(id -u) "$PLIST"
 ```
 
 Check it with `launchctl print gui/$(id -u)/com.wineview.monitor` and

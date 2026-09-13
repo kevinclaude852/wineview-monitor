@@ -5,3 +5,5 @@ __pycache__/
 venv/
 .venv/
 state.json
+.playwright-profile/
+monitor.log

@@ -3,11 +3,22 @@
 <!--
   launchd job: run the monitor once an hour on macOS.
 
-  Replace every /ABSOLUTE/PATH/TO/wineview-monitor and the two Telegram
-  values, then install with:
+  Install, from the repo root:
 
       cp deploy/com.wineview.monitor.plist ~/Library/LaunchAgents/
-      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wineview.monitor.plist
+      PLIST=~/Library/LaunchAgents/com.wineview.monitor.plist
+      sed -i '' "s|__REPO_DIR__|$PWD|g" "$PLIST"
+
+  Then open "$PLIST" and fill in the two REPLACE_WITH_ values below (by hand,
+  so the bot token stays out of your shell history), and load it:
+
+      launchctl bootstrap gui/$(id -u) "$PLIST"
+
+  launchd caches the job when it is bootstrapped, so after any later edit to
+  this file you must reload it. Running kickstart alone keeps the old copy:
+
+      launchctl bootout gui/$(id -u)/com.wineview.monitor
+      launchctl bootstrap gui/$(id -u) "$PLIST"
 -->
 <plist version="1.0">
 <dict>
@@ -16,14 +27,14 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/ABSOLUTE/PATH/TO/wineview-monitor/.venv/bin/python</string>
+        <string>__REPO_DIR__/.venv/bin/python</string>
         <string>main.py</string>
         <string>--once</string>
     </array>
 
     <!-- state.json and monitor.log are written relative to this directory -->
     <key>WorkingDirectory</key>
-    <string>/ABSOLUTE/PATH/TO/wineview-monitor</string>
+    <string>__REPO_DIR__</string>
 
     <!-- launchd does not inherit your shell environment -->
     <key>EnvironmentVariables</key>
@@ -46,8 +57,8 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/ABSOLUTE/PATH/TO/wineview-monitor/monitor.log</string>
+    <string>__REPO_DIR__/monitor.log</string>
     <key>StandardErrorPath</key>
-    <string>/ABSOLUTE/PATH/TO/wineview-monitor/monitor.log</string>
+    <string>__REPO_DIR__/monitor.log</string>
 </dict>
 </plist>
