@@ -583,25 +583,35 @@ def detect_new_products() -> tuple[list[Product], list[Product]]:
         logger.warning("Scrape returned 0 products and no previous state exists")
         return [], []
 
-    is_bootstrap = not previous
-    new_products = []
     for p in current:
-        if p.id not in previous:
-            new_products.append(p)
-        else:
+        if p.id in previous:
             # Preserve original first_seen date
             p.first_seen = previous[p.id]["first_seen"]
 
-    if is_bootstrap and new_products:
-        # No prior state (first-ever run, or state store was reset) — every
-        # currently-listed product would otherwise look "new". Seed the
-        # baseline silently instead of flooding notifications with the
-        # entire existing catalog.
+    if not previous:
+        # First-ever run, or the state store was reset. Everything listed would
+        # otherwise look new; seed the baseline silently instead of announcing
+        # the whole catalogue.
         logger.info(
             "No previous state found; seeding baseline of %d product(s) without notifying",
-            len(new_products),
+            len(current),
         )
-        new_products = []
+        return [], current
+
+    # Products come back newest-first, so the first one already in state marks
+    # the boundary: everything above it is genuinely newer than anything seen
+    # before. An unknown product *below* it is older stock only now coming into
+    # view — after PRODUCT_LIMIT is raised, say — not a new listing.
+    first_known = next((i for i, p in enumerate(current) if p.id in previous), None)
+    if first_known is None:
+        logger.warning(
+            "None of the %d fetched products appear in the %d-product state; "
+            "reseeding rather than reporting them all as new",
+            len(current), len(previous),
+        )
+        return [], current
+
+    new_products = current[:first_known]
 
     if new_products:
         logger.info("Found %d new product(s)", len(new_products))

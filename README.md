@@ -84,6 +84,11 @@ The newest `PRODUCT_LIMIT` products (default 100, one page). Results are
 newest-first, so anything added since the last run is in that slice. No
 category filtering: everything the shop lists is reported.
 
+Because the results are ordered, "new" means *above the newest product already
+in state*, not merely absent from it. An unknown product below that boundary is
+older stock coming into view — after raising `PRODUCT_LIMIT`, say — and is
+recorded silently rather than announced.
+
 Relevant env vars: `PRODUCT_LIMIT` sizes that window, `USE_STORE_API=0` skips
 (1), `USE_PLAYWRIGHT=0` skips (2), `PLAYWRIGHT_HEADLESS=0` shows the browser
 window, and `PLAYWRIGHT_PROFILE_DIR` moves the profile.
