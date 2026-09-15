@@ -7,3 +7,5 @@ venv/
 state.json
 .playwright-profile/
 monitor.log
+deals_state.json
+deals_page.html

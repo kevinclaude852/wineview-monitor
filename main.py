@@ -14,6 +14,7 @@ import os
 
 from flask import Flask, Response, request
 
+import deals
 import notifier
 import rss
 from scraper import (
@@ -54,28 +55,55 @@ def _load_state_into_rss() -> None:
         logger.info("Loaded %d products from state", len(products))
 
 
+def _product_job() -> None:
+    new_products, all_products = detect_new_products()
+    if not all_products:
+        return  # failed fetch; prior state left untouched
+
+    rss.add_new_products(new_products)
+    if new_products:
+        if not notifier.send_new_products(new_products):
+            # Leave state unsaved so these are reported again next run
+            # rather than being silently marked as seen.
+            logger.warning(
+                "Notification failed; %d product(s) left unsaved to retry next run",
+                len(new_products),
+            )
+            return
+    else:
+        rss.load_from_state(all_products)
+    save_state(all_products)
+
+
+def _deal_job() -> None:
+    new_deals, current_deals = deals.detect_new_deals()
+    if current_deals is None:
+        return  # fetch failed; keep prior deal state
+
+    if new_deals and not notifier.send_deals(new_deals):
+        logger.warning(
+            "Deal notification failed; %d deal(s) left unsaved to retry next run",
+            len(new_deals),
+        )
+        return
+    # Persist the current set even when nothing is new, so expired deals drop
+    # out and a later re-listing is seen as new again.
+    deals.save_deal_state(current_deals)
+
+
 def scrape_job() -> None:
     logger.info("Scrape job started")
+    # The two monitors are independent — a failure in one must not stop the
+    # other. Deals are checked after the new-arrivals monitor, as a separate
+    # Telegram message.
     try:
-        new_products, all_products = detect_new_products()
-        if not all_products:
-            return  # failed fetch; prior state left untouched
-
-        rss.add_new_products(new_products)
-        if new_products:
-            if not notifier.send_new_products(new_products):
-                # Leave state unsaved so these are reported again next run
-                # rather than being silently marked as seen.
-                logger.warning(
-                    "Notification failed; %d product(s) left unsaved to retry next run",
-                    len(new_products),
-                )
-                return
-        else:
-            rss.load_from_state(all_products)
-        save_state(all_products)
+        _product_job()
     except Exception:
-        logger.exception("Scrape job failed")
+        logger.exception("Product check failed")
+    try:
+        _deal_job()
+    except Exception:
+        logger.exception("Deal check failed")
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +198,18 @@ Interval: every <strong>{SCRAPE_INTERVAL_HOURS:.0f} hours</strong></p>
 
 if __name__ == "__main__":
     import sys
+    from pathlib import Path
+
+    # `--dump-deals` writes the rendered deals-page HTML to a file for
+    # inspection, so the parser's selectors can be checked against reality.
+    if "--dump-deals" in sys.argv:
+        html = deals.fetch_deals_html()
+        if not html:
+            print("Deals page unavailable (bot-check or empty).")
+        else:
+            Path("deals_page.html").write_text(html)
+            print(f"Wrote deals_page.html ({len(html)} bytes)")
+        sys.exit(0)
 
     _load_state_into_rss()
     scrape_job()  # immediate scrape on startup
