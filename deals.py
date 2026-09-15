@@ -16,6 +16,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, asdict
+from html import unescape
 from pathlib import Path
 from typing import Optional
 
@@ -29,14 +30,11 @@ DEALS_URL = "https://wineview.com.hk/deals/?tab=product-deals&subtab=current-dea
 DEALS_STATE_FILE = Path(os.environ.get("DEALS_STATE_FILE", "deals_state.json"))
 DEALS_REDIS_KEY = "wineview:deals"
 
-# How far up from a product link to look for its price block.
-_MAX_CONTAINER_DEPTH = 6
+# The current-deals list is rendered by the "Deals for WooCommerce" plugin as
+# <ul class="dfw-current-deals-tab-content"> with one <li> per deal.
+DEAL_LI_SELECTOR = "ul.dfw-current-deals-tab-content > li"
 
 _AMOUNT_RE = re.compile(r"[\d,]+(?:\.\d{1,2})?")
-# A price string contains only currency punctuation and digits (no letters),
-# which excludes product names — and requires a '$' so bare numbers such as a
-# vintage year or "750ml" volume never count as prices.
-_NON_PRICE_RE = re.compile(r"[^\d\s$.,]")
 
 
 @dataclass
@@ -56,11 +54,6 @@ def _prettify(slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
-def _is_price_text(text: str) -> bool:
-    text = text.strip()
-    return bool(text) and "$" in text and not _NON_PRICE_RE.search(text)
-
-
 def _amounts(text: str) -> list[float]:
     out = []
     for m in _AMOUNT_RE.findall(text):
@@ -75,81 +68,58 @@ def _fmt(value: float) -> str:
     return f"$ {value:,.2f}"
 
 
-def _product_slugs_under(node) -> set:
-    return {
-        _slug(a["href"])
-        for a in node.find_all("a", href=True)
-        if "/product/" in a["href"]
-    }
+def _price_text(el) -> str:
+    """Normalise a WooCommerce <del>/<ins> price element to '$ 160.00'.
 
-
-def _prices_near(anchor) -> list[float]:
+    The currency symbol and digits sit in separate spans, so join the element's
+    text with no separator ('$' + '160.00' -> '$160.00') before parsing.
     """
-    Find the prices belonging to one product's deal card.
+    if el is None:
+        return ""
+    amounts = _amounts(el.get_text("", strip=True))
+    return _fmt(amounts[0]) if amounts else ""
 
-    Walk up from the product link as long as the ancestor still contains only
-    that product, and stop before crossing into a container that also holds a
-    different product — that boundary is the card. Then read every price in it.
-    Scanning card text (not just the link) copes with prices rendered as
-    <del>/<ins>, spans, or plain text; the boundary stops a link with no price
-    of its own (a nav or full-price item) from borrowing neighbouring prices.
-    """
-    slug = _slug(anchor["href"])
-    card = anchor
-    node = anchor
-    for _ in range(_MAX_CONTAINER_DEPTH):
-        parent = node.parent
-        if parent is None:
-            break
-        if _product_slugs_under(parent) - {slug}:
-            break  # parent also holds another product — don't cross the card edge
-        node = parent
-        card = parent
 
-    amounts = []
-    for s in card.stripped_strings:
-        if _is_price_text(s):
-            amounts.extend(_amounts(s))
-    return amounts
+def _deal_name(li, slug: str) -> str:
+    heading = li.find(["h1", "h2", "h3", "h4"])
+    if heading and heading.get_text(strip=True):
+        return unescape(heading.get_text(" ", strip=True))
+    img = li.find("img", alt=True)
+    if img and img.get("alt", "").strip():
+        return unescape(img["alt"].strip())
+    return _prettify(slug)
 
 
 def parse_deals(html: str) -> list[Deal]:
     """
-    Extract current deals. A deal is a product link whose surrounding card shows
-    a discounted pair of prices (original + reduced); the lower is the current
-    price, the higher the original.
+    Extract current deals from the deals-plugin list. Each <li> holds a product
+    link, an <h2> name, and standard WooCommerce sale markup: <del> original
+    price, <ins> discounted price.
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    order: list[str] = []
-    info: dict[str, dict] = {}
-    for a in soup.find_all("a", href=True):
-        if "/product/" not in a["href"]:
-            continue
-        slug = _slug(a["href"])
-        if not slug:
-            continue
-        if slug not in info:
-            info[slug] = {"url": a["href"].split("?")[0], "names": [], "anchor": a}
-            order.append(slug)
-        text = a.get_text(" ", strip=True)
-        # A name link has letters and isn't itself a price.
-        if text and re.search(r"[A-Za-z]", text) and not _is_price_text(text):
-            info[slug]["names"].append(text)
-
     deals = []
-    for slug in order:
-        entry = info[slug]
-        amounts = _prices_near(entry["anchor"])
-        if len(set(amounts)) < 2:
-            continue  # not a discounted item — skip nav links, full-price products
-        name = max(entry["names"], key=len) if entry["names"] else _prettify(slug)
+    seen = set()
+    for li in soup.select(DEAL_LI_SELECTOR):
+        link = li.find("a", href=lambda h: h and "/product/" in h)
+        if not link:
+            continue
+        slug = _slug(link["href"])
+        if not slug or slug in seen:
+            continue
+
+        regular = _price_text(li.find("del"))   # original
+        current = _price_text(li.find("ins"))   # discounted
+        if not (current or regular):
+            continue  # no price -> not a usable deal entry
+
+        seen.add(slug)
         deals.append(Deal(
             id=slug,
-            name=name,
-            url=entry["url"],
-            price=_fmt(min(amounts)),
-            regular_price=_fmt(max(amounts)),
+            name=_deal_name(li, slug),
+            url=link["href"].split("?")[0],
+            price=current or regular,
+            regular_price=regular if (current and regular) else "",
         ))
     return deals
 
