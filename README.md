@@ -6,14 +6,37 @@ status page.
 
 ## How it works
 
-- `scraper.py` scrapes every page of the wine shop category, compares product
-  IDs against previously saved state (Redis if `REDIS_URL`/`KV_URL` is set,
-  otherwise a local `state.json` file), and returns anything new.
-- `notifier.py` sends a Telegram message listing the new products.
+- `scraper.py` fetches the newest products from the WooCommerce Store API,
+  compares them against previously saved state (Redis if `REDIS_URL`/`KV_URL`
+  is set, otherwise a local `state.json` file), and returns anything new.
+- `deals.py` scrapes the current deal-of-the-day page and diffs it against its
+  own cache (`deals_state.json` / Redis key `wineview:deals`).
+- `notifier.py` sends the Telegram messages — new arrivals and deals as two
+  separate messages.
 - `rss.py` keeps an RSS feed (`/rss`) of the most recent products.
 - `main.py` wires it together: on Railway it runs the check on an in-process
   scheduler (`SCRAPE_INTERVAL_HOURS`, default `1`); on Vercel it's triggered by
   Vercel Cron hitting `/api/scrape`.
+
+Each run does two independent checks: the new-arrivals monitor, then the
+deal-of-the-day monitor. Either can fail without affecting the other.
+
+### Deal of the day
+
+The `/deals/` page has no JSON API, so it is scraped from rendered HTML through
+the same browser transport as the products (it is behind the same bot check).
+Each run diffs the current deals against the previous run's cache and sends a
+separate "Latest Deal of the Day at WineView HK" message listing only new
+deals — name, discounted price and original price (the HTML carries no
+country/region/grape origin). Expired deals drop out of the cache, so a wine
+re-listed in a later promotion round notifies again. No deals means no message.
+
+If the deals message is ever empty or wrong, dump the rendered page to check the
+parser against reality:
+
+```bash
+python main.py --dump-deals   # writes deals_page.html
+```
 
 ## Telegram setup
 

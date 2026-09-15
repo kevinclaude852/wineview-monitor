@@ -446,6 +446,38 @@ def fetch_products_via_browser(max_products: int = PRODUCT_LIMIT) -> list[Produc
             context.close()
 
 
+def fetch_rendered_html(url: str, settle_ms: int = 2000) -> Optional[str]:
+    """
+    Return a page's fully-rendered HTML through the browser, or None if the bot
+    check couldn't be cleared. Used for pages that have no JSON API (the deals
+    page), reusing the same persistent profile so the challenge cookie is shared.
+    """
+    from playwright.sync_api import sync_playwright
+
+    profile_dir = Path(PLAYWRIGHT_PROFILE_DIR).expanduser()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            str(profile_dir),
+            headless=PLAYWRIGHT_HEADLESS,
+            locale="en-US",
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT_MS)
+            _wait_out_challenge(page)
+            if settle_ms:
+                page.wait_for_timeout(settle_ms)  # let any JS-rendered content settle
+            html = page.content()
+        finally:
+            context.close()
+
+    if "sgcaptcha" in html or len(html) < 500:
+        return None
+    return html
+
+
 def scrape_all_products(max_products: int = PRODUCT_LIMIT) -> list[Product]:
     """Store API over HTTP, then through a browser, then HTML scraping."""
     if USE_STORE_API:

@@ -93,6 +93,51 @@ def _format_message(products: list[Product]) -> str:
     return header + "\n" + "\n\n".join(entries)
 
 
+def _format_deals_message(deals: list) -> str:
+    """
+    Deal-of-the-day message. Deals are HTML-scraped so they carry only name,
+    url and the discounted/original price — no country/region/grape origin.
+    """
+    count = len(deals)
+    header = f"Latest Deal of the Day at WineView HK \\({count}\\):"
+
+    entries = []
+    for d in deals[:MAX_PRODUCTS_PER_MESSAGE]:
+        entry_lines = [f"*[{_escape_md(d.name)}]({_escape_md_url(d.url)})*"]
+        if d.regular_price and d.price:
+            entry_lines.append(_sale_block(d.regular_price, d.price))
+        elif d.price:
+            entry_lines.append(_escape_md(_clean_amount(d.price)))
+        entries.append("\n".join(entry_lines))
+
+    remaining = count - MAX_PRODUCTS_PER_MESSAGE
+    if remaining > 0:
+        entries.append(_escape_md(f"...and {remaining} more"))
+
+    return header + "\n" + "\n\n".join(entries)
+
+
+def _post(text: str) -> bool:
+    """POST one MarkdownV2 message to Telegram. True on success, False on failure."""
+    url = TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN)
+    try:
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "MarkdownV2",
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException:
+        logger.exception("Failed to send Telegram notification")
+        return False
+
+
 def send_new_products(products: list[Product]) -> bool:
     """
     Send a Telegram message listing newly detected products.
@@ -112,22 +157,27 @@ def send_new_products(products: list[Product]) -> bool:
         )
         return True
 
-    text = _format_message(products)
-    url = TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN)
-    try:
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "MarkdownV2",
-                "disable_web_page_preview": True,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
+    if _post(_format_message(products)):
         logger.info("Sent Telegram notification for %d new product(s)", len(products))
         return True
-    except requests.RequestException:
-        logger.exception("Failed to send Telegram notification")
-        return False
+    return False
+
+
+def send_deals(deals: list) -> bool:
+    """
+    Send a separate 'Deal of the Day' message. Same success/failure contract as
+    send_new_products, so the caller only saves deal state on a real delivery.
+    """
+    if not deals:
+        return True
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning(
+            "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set; skipping notification for %d deal(s)",
+            len(deals),
+        )
+        return True
+
+    if _post(_format_deals_message(deals)):
+        logger.info("Sent Telegram deal notification for %d deal(s)", len(deals))
+        return True
+    return False
