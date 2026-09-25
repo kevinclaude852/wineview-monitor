@@ -204,14 +204,17 @@ commit it. The spreadsheet must be shared, as an editor, with the
 `client_email` in that key.
 
 ```bash
-pip install -r requirements-crawler.txt   # the monitor's .venv is fine
-python wineview_crawler.py                # one refresh, then exit
+.venv/bin/pip install -r requirements-crawler.txt   # the monitor's .venv is fine
+.venv/bin/playwright install chromium               # skip if the monitor already did it
+.venv/bin/python wineview_crawler.py                # one refresh, then exit
 ```
 
-It fetches over plain HTTP, without the browser fallback the monitor has. If
-`crawler.log` shows `Status 202` retries ending in `Giving up`, the site's bot
-check is rejecting it (see "How products are fetched" above). The sheet is only
-touched after every page has been fetched, so a blocked run leaves it as it was.
+It tries plain HTTP first. When the site's bot check answers with a `Status
+202` challenge (see "How products are fetched" above), it switches to a
+headless Chromium for the rest of the run. That browser keeps its own profile
+in `.playwright-profile-crawler/`, so it never collides with the monitor's
+browser. The sheet is only touched after every page has been fetched, so a
+failed fetch leaves it as it was.
 
 ### Every day at 9:00 on macOS (launchd)
 
