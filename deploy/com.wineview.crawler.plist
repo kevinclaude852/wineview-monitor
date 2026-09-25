@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: refresh the full product list in Google Sheets every day at
+  9:00 on macOS. Independent of the hourly monitor job; install steps are in
+  README.md under "Daily product refresh".
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wineview.crawler</string>
+
+    <!-- -u: unbuffered, so progress lines and any traceback reach
+         crawler.log in the order they happened -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO_DIR__/.venv/bin/python</string>
+        <string>-u</string>
+        <string>wineview_crawler.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <!-- Every day at 9:00 local time. If the Mac is asleep then, launchd
+         runs the job once after it wakes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__REPO_DIR__/crawler.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO_DIR__/crawler.log</string>
+</dict>
+</plist>

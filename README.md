@@ -4,6 +4,9 @@ Checks https://wineview.com.hk/product-category/wine-shop/ every hour, detects
 newly listed wines, and sends them to Telegram. Also exposes an RSS feed and a
 status page.
 
+Separately, `wineview_crawler.py` refreshes a Google Sheet with the full product
+list every morning — see [Daily product refresh](#daily-product-refresh-google-sheets).
+
 ## How it works
 
 - `scraper.py` fetches the newest products from the WooCommerce Store API,
@@ -186,6 +189,52 @@ the monitor only runs when you happen to wake it.
 
 ```cron
 0 * * * * cd /path/to/wineview-monitor && TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... /path/to/.venv/bin/python main.py --once >> monitor.log 2>&1
+```
+
+## Daily product refresh (Google Sheets)
+
+`wineview_crawler.py` is a separate job from the monitor. It pulls the whole
+catalogue from the Store API and replaces the "All Products" worksheet of the
+Google Sheet with it. It shares no code, state or schedule with the monitor, so
+either one can run or fail without affecting the other.
+
+It needs the Google service-account key saved as **`credentials.json` in the
+repo root**, next to `wineview_crawler.py`. That file is gitignored: never
+commit it. The spreadsheet must be shared, as an editor, with the
+`client_email` in that key.
+
+```bash
+pip install -r requirements-crawler.txt   # the monitor's .venv is fine
+python wineview_crawler.py                # one refresh, then exit
+```
+
+It fetches over plain HTTP, without the browser fallback the monitor has. If
+`crawler.log` shows `Status 202` retries ending in `Giving up`, the site's bot
+check is rejecting it (see "How products are fetched" above). The sheet is only
+touched after every page has been fetched, so a blocked run leaves it as it was.
+
+### Every day at 9:00 on macOS (launchd)
+
+`deploy/com.wineview.crawler.plist` runs it at 9:00 local time and logs to
+`crawler.log`:
+
+```bash
+cp deploy/com.wineview.crawler.plist ~/Library/LaunchAgents/
+PLIST=~/Library/LaunchAgents/com.wineview.crawler.plist
+sed -i '' "s|__REPO_DIR__|$PWD|g" "$PLIST"
+launchctl bootstrap gui/$(id -u) "$PLIST"
+launchctl kickstart -k gui/$(id -u)/com.wineview.crawler   # run now, to test
+```
+
+The notes on the monitor's job apply here too. After editing the plist, reload
+it with `bootout` then `bootstrap`. If the Mac is asleep at 9:00, the run
+happens when it wakes. To stop it:
+`launchctl bootout gui/$(id -u)/com.wineview.crawler`.
+
+### Every day at 9:00 on Linux (cron)
+
+```cron
+0 9 * * * cd /path/to/wineview-monitor && /path/to/.venv/bin/python -u wineview_crawler.py >> crawler.log 2>&1
 ```
 
 ## Deploy
