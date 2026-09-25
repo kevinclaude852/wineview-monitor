@@ -9,3 +9,5 @@ state.json
 monitor.log
 deals_state.json
 deals_page.html
+credentials.json
+crawler.log

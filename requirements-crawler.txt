@@ -1,0 +1,7 @@
+# For wineview_crawler.py only. Kept out of requirements.txt so the monitor's
+# Railway/Vercel deploys don't pull in pandas and the Google client libraries.
+requests>=2.32
+beautifulsoup4>=4.12
+pandas>=2.1  # DataFrame.map
+gspread>=6.0
+gspread-dataframe>=4.0
