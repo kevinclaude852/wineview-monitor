@@ -1,5 +1,6 @@
 import time
 import html
+import json
 import re
 from pathlib import Path
 
@@ -34,6 +35,15 @@ MAX_RETRIES = 5
 SLEEP_BETWEEN = 3
 BACKOFF_BASE = 3
 TIMEOUT = 30
+
+# Browser fallback for when the site's bot check answers plain requests
+# with a 202 challenge page. Its own profile, so it never collides with the
+# monitor's browser when both run at the same time.
+SHOP_URL = "https://wineview.com.hk/product-category/wine-shop/"
+BROWSER_PROFILE_DIR = (
+    Path(__file__).resolve().parent / ".playwright-profile-crawler"
+)
+BROWSER_TIMEOUT_MS = 45_000
 
 
 # ============================================================
@@ -84,6 +94,10 @@ def fetch_page(session, url):
 
             if response.status_code == 200:
                 return response.json()
+
+            if response.status_code == 202:
+                print("Status 202: blocked by the site's bot check.")
+                return None
 
             wait_seconds = BACKOFF_BASE * attempt
 
@@ -140,50 +154,180 @@ def fetch_page(session, url):
     return None
 
 
+class BrowserFetcher:
+    """
+    Fetch API pages from inside a real Chromium page, which passes
+    the site's bot check where plain requests get a 202 challenge.
+    """
+
+    def __init__(self):
+        from playwright.sync_api import sync_playwright
+
+        BROWSER_PROFILE_DIR.mkdir(exist_ok=True)
+
+        self._playwright = sync_playwright().start()
+
+        try:
+            self._context = (
+                self._playwright.chromium.launch_persistent_context(
+                    str(BROWSER_PROFILE_DIR),
+                    headless=True,
+                    locale="en-US"
+                )
+            )
+
+            self._page = (
+                self._context.pages[0]
+                if self._context.pages
+                else self._context.new_page()
+            )
+
+            # Load a normal page first so the bot check runs on a
+            # real navigation and sets its cookie.
+            self._page.goto(
+                SHOP_URL,
+                wait_until="domcontentloaded",
+                timeout=BROWSER_TIMEOUT_MS
+            )
+
+            self._wait_out_challenge()
+
+        except Exception:
+            self.close()
+            raise
+
+    def _wait_out_challenge(self):
+        deadline = time.monotonic() + BROWSER_TIMEOUT_MS / 1000
+
+        while time.monotonic() < deadline:
+            try:
+                if (
+                    "sgcaptcha" not in self._page.url
+                    and "sgcaptcha" not in self._page.content()
+                ):
+                    return
+
+            except Exception:
+                pass  # mid-navigation; look again shortly
+
+            self._page.wait_for_timeout(1000)
+
+        print("Bot check still present after waiting; trying anyway.")
+
+    def fetch_page(self, url):
+        """
+        Fetch one API page through the browser.
+
+        Returns:
+            list: Parsed JSON response.
+            None: If all retry attempts fail.
+        """
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                result = self._page.evaluate(
+                    """async (url) => {
+                        const response = await fetch(url, {
+                            credentials: 'include',
+                            headers: {'Accept': 'application/json'},
+                        });
+                        return {
+                            status: response.status,
+                            body: await response.text(),
+                        };
+                    }""",
+                    url
+                )
+
+                if result["status"] == 200:
+                    return json.loads(result["body"])
+
+                problem = f"Status {result['status']}"
+
+            except Exception as error:
+                problem = f"{type(error).__name__}: {error}"
+
+            wait_seconds = BACKOFF_BASE * attempt
+
+            print(
+                f"Browser attempt {attempt}/{MAX_RETRIES} failed "
+                f"({problem}). Retrying in {wait_seconds} seconds..."
+            )
+
+            time.sleep(wait_seconds)
+
+        print(
+            f"Giving up after {MAX_RETRIES} browser attempts: {url}"
+        )
+
+        return None
+
+    def close(self):
+        if getattr(self, "_context", None) is not None:
+            self._context.close()
+
+        self._playwright.stop()
+
+
 def fetch_all_products(base_url):
     """
     Fetch all product pages and return the raw product data
     as a pandas DataFrame.
+
+    Plain requests are tried first. If they fail, the rest of the
+    run switches to a real browser.
     """
     all_products = []
     page = 1
+    browser = None
 
-    with create_session() as session:
+    try:
+        with create_session() as session:
+            while True:
+                url = f"{base_url}&page={page}"
 
-        while True:
-            url = f"{base_url}&page={page}"
+                print(f"Fetching page {page}...")
 
-            print(f"Fetching page {page}...")
+                if browser is None:
+                    data = fetch_page(session, url)
 
-            data = fetch_page(session, url)
+                    if data is None:
+                        print("Switching to the browser...")
+                        browser = BrowserFetcher()
 
-            if data is None:
-                raise RuntimeError(
-                    f"Could not fetch page {page} after "
-                    f"{MAX_RETRIES} attempts."
+                if browser is not None:
+                    data = browser.fetch_page(url)
+
+                if data is None:
+                    raise RuntimeError(
+                        f"Could not fetch page {page} after "
+                        f"{MAX_RETRIES} attempts."
+                    )
+
+                if not isinstance(data, list):
+                    raise TypeError(
+                        f"Unexpected API response on page {page}. "
+                        f"Expected list, received {type(data).__name__}."
+                    )
+
+                if not data:
+                    print("Reached the end of the product pages.")
+                    break
+
+                for item in data:
+                    product = parse_product(item, page)
+                    all_products.append(product)
+
+                print(
+                    f"Page {page} completed. "
+                    f"Total products fetched: {len(all_products):,}"
                 )
 
-            if not isinstance(data, list):
-                raise TypeError(
-                    f"Unexpected API response on page {page}. "
-                    f"Expected list, received {type(data).__name__}."
-                )
+                page += 1
+                time.sleep(SLEEP_BETWEEN)
 
-            if not data:
-                print("Reached the end of the product pages.")
-                break
-
-            for item in data:
-                product = parse_product(item, page)
-                all_products.append(product)
-
-            print(
-                f"Page {page} completed. "
-                f"Total products fetched: {len(all_products):,}"
-            )
-
-            page += 1
-            time.sleep(SLEEP_BETWEEN)
+    finally:
+        if browser is not None:
+            browser.close()
 
     columns_order = [
         "ID",
